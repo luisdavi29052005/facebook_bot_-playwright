@@ -1,0 +1,14 @@
+
+venv/
+__pycache__/
+logs/
+*.log
+sessions/
+*.sqlite3
+*.db
+*.pkl
+.DS_Store
+*.swp
+*.bak
+
+*bfg-1.14.0.jar

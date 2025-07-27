@@ -1,0 +1,557 @@
+
+{% extends "base.html" %}
+
+{% block title %}Logs - Facebook Bot Dashboard{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- Page Header -->
+    <div class="page-header" data-aos="fade-up">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+            <div>
+                <h1 class="page-title">
+                    <i class="fas fa-file-alt me-3"></i>System Logs
+                </h1>
+                <p class="page-subtitle">Monitor bot activity and troubleshoot issues in real-time</p>
+            </div>
+            <div class="d-flex gap-2 flex-wrap">
+                <button class="btn btn-outline-primary" onclick="refreshLogs()">
+                    <i class="fas fa-sync-alt me-1"></i>Refresh
+                </button>
+                <button class="btn btn-outline-secondary" onclick="clearLogs()">
+                    <i class="fas fa-trash me-1"></i>Clear
+                </button>
+                <button class="btn btn-outline-success" onclick="downloadLogs()">
+                    <i class="fas fa-download me-1"></i>Download
+                </button>
+                <a href="{{ url_for('dashboard') }}" class="btn btn-primary">
+                    <i class="fas fa-arrow-left me-1"></i>Back to Dashboard
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Controls -->
+    <div class="row g-4 mb-4">
+        <div class="col-lg-8" data-aos="fade-up" data-aos-delay="200">
+            <div class="card">
+                <div class="card-body">
+                    <div class="row g-3 align-items-center">
+                        <!-- Search -->
+                        <div class="col-lg-4">
+                            <div class="input-group">
+                                <span class="input-group-text">
+                                    <i class="fas fa-search"></i>
+                                </span>
+                                <input type="text" 
+                                       class="form-control" 
+                                       id="log-search" 
+                                       placeholder="Search logs..."
+                                       oninput="filterLogs()">
+                            </div>
+                        </div>
+                        
+                        <!-- Log Level Filter -->
+                        <div class="col-lg-3">
+                            <select class="form-select" id="log-level-filter" onchange="filterLogs()">
+                                <option value="all">All Levels</option>
+                                <option value="error">Errors Only</option>
+                                <option value="warning">Warnings Only</option>
+                                <option value="info">Info Only</option>
+                                <option value="success">Success Only</option>
+                            </select>
+                        </div>
+                        
+                        <!-- Live Updates Toggle -->
+                        <div class="col-lg-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="auto-refresh" checked>
+                                <label class="form-check-label" for="auto-refresh">
+                                    <i class="fas fa-broadcast-tower me-1"></i>Live Updates
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <!-- Auto Scroll -->
+                        <div class="col-lg-2">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="auto-scroll" checked>
+                                <label class="form-check-label" for="auto-scroll">
+                                    <i class="fas fa-arrow-down me-1"></i>Auto-scroll
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Log Statistics -->
+        <div class="col-lg-4" data-aos="fade-up" data-aos-delay="300">
+            <div class="card">
+                <div class="card-body">
+                    <div class="row text-center g-3">
+                        <div class="col-3">
+                            <div class="p-2">
+                                <div class="h6 text-danger mb-1" id="error-count">0</div>
+                                <small class="text-muted">Errors</small>
+                            </div>
+                        </div>
+                        <div class="col-3">
+                            <div class="p-2">
+                                <div class="h6 text-warning mb-1" id="warning-count">0</div>
+                                <small class="text-muted">Warnings</small>
+                            </div>
+                        </div>
+                        <div class="col-3">
+                            <div class="p-2">
+                                <div class="h6 text-info mb-1" id="info-count">0</div>
+                                <small class="text-muted">Info</small>
+                            </div>
+                        </div>
+                        <div class="col-3">
+                            <div class="p-2">
+                                <div class="h6 text-success mb-1" id="success-count">0</div>
+                                <small class="text-muted">Success</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Logs Container -->
+    <div class="row">
+        <div class="col-12" data-aos="fade-up" data-aos-delay="400">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <div>
+                        <h5 class="mb-0">
+                            <i class="fas fa-terminal text-primary"></i>
+                            Activity Logs
+                        </h5>
+                        <small class="text-muted">Real-time bot activity and system events</small>
+                    </div>
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="status-indicator status-running" id="live-indicator"></span>
+                            <small class="text-muted">
+                                Last updated: <span id="last-update">--</span>
+                            </small>
+                        </div>
+                        <div class="dropdown">
+                            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" 
+                                    type="button" 
+                                    data-bs-toggle="dropdown">
+                                <i class="fas fa-cog"></i>
+                            </button>
+                            <ul class="dropdown-menu">
+                                <li>
+                                    <a class="dropdown-item" href="#" onclick="toggleWordWrap()">
+                                        <i class="fas fa-text-width me-2"></i>Toggle Word Wrap
+                                    </a>
+                                </li>
+                                <li>
+                                    <a class="dropdown-item" href="#" onclick="toggleTimestamps()">
+                                        <i class="fas fa-clock me-2"></i>Toggle Timestamps
+                                    </a>
+                                </li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li>
+                                    <a class="dropdown-item" href="#" onclick="exportLogs()">
+                                        <i class="fas fa-file-export me-2"></i>Export Logs
+                                    </a>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <!-- Log Container -->
+                    <div id="logs-container" class="log-container" style="height: 70vh; position: relative;">
+                        <div class="text-center py-5">
+                            <i class="fas fa-spinner animate-spin text-primary fs-3 mb-3"></i>
+                            <div class="text-muted">Loading logs...</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Log Entry Template (Hidden) -->
+                    <template id="log-entry-template">
+                        <div class="log-entry" data-level="" data-timestamp="">
+                            <div class="log-content">
+                                <span class="log-timestamp"></span>
+                                <span class="log-level-badge"></span>
+                                <span class="log-message"></span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+                
+                <!-- Footer -->
+                <div class="card-footer d-flex justify-content-between align-items-center">
+                    <small class="text-muted">
+                        <i class="fas fa-info-circle me-1"></i>
+                        Showing <span id="visible-logs-count">0</span> of <span id="total-logs-count">0</span> log entries
+                    </small>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-outline-primary" onclick="scrollToTop()">
+                            <i class="fas fa-arrow-up me-1"></i>Top
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary" onclick="scrollToBottom()">
+                            <i class="fas fa-arrow-down me-1"></i>Bottom
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let autoRefreshInterval;
+let allLogs = [];
+let filteredLogs = [];
+let logCounts = { error: 0, warning: 0, info: 0, success: 0 };
+
+/**
+ * Refreshes logs from the server
+ */
+function refreshLogs() {
+    const logsContainer = document.getElementById('logs-container');
+    const liveIndicator = document.getElementById('live-indicator');
+    const lastUpdate = document.getElementById('last-update');
+    
+    // Show loading state
+    liveIndicator.className = 'status-indicator status-warning';
+    
+    fetch('/api/status')
+        .then(response => response.json())
+        .then(data => {
+            if (data.logs && data.logs.length > 0) {
+                allLogs = data.logs.map((log, index) => ({
+                    id: Date.now() + index,
+                    text: log,
+                    timestamp: new Date().toLocaleTimeString('pt-BR'),
+                    level: detectLogLevel(log)
+                }));
+                
+                updateLogCounts();
+                filterLogs();
+                
+                liveIndicator.className = 'status-indicator status-running';
+            } else {
+                displayEmptyState();
+            }
+            
+            lastUpdate.textContent = new Date().toLocaleTimeString('pt-BR');
+        })
+        .catch(error => {
+            console.error('Error refreshing logs:', error);
+            liveIndicator.className = 'status-indicator status-stopped';
+            displayErrorState();
+        });
+}
+
+/**
+ * Detects log level from log text
+ */
+function detectLogLevel(logText) {
+    const text = logText.toLowerCase();
+    
+    if (text.includes('[error]') || text.includes('error') || text.includes('❌') || text.includes('falha')) {
+        return 'error';
+    } else if (text.includes('[warning]') || text.includes('warning') || text.includes('⚠️') || text.includes('aviso')) {
+        return 'warning';
+    } else if (text.includes('[success]') || text.includes('success') || text.includes('✅') || text.includes('sucesso')) {
+        return 'success';
+    } else {
+        return 'info';
+    }
+}
+
+/**
+ * Updates log level counts
+ */
+function updateLogCounts() {
+    logCounts = { error: 0, warning: 0, info: 0, success: 0 };
+    
+    allLogs.forEach(log => {
+        logCounts[log.level]++;
+    });
+    
+    document.getElementById('error-count').textContent = logCounts.error;
+    document.getElementById('warning-count').textContent = logCounts.warning;
+    document.getElementById('info-count').textContent = logCounts.info;
+    document.getElementById('success-count').textContent = logCounts.success;
+}
+
+/**
+ * Filters logs based on search and level filter
+ */
+function filterLogs() {
+    const searchTerm = document.getElementById('log-search').value.toLowerCase();
+    const levelFilter = document.getElementById('log-level-filter').value;
+    
+    filteredLogs = allLogs.filter(log => {
+        const matchesSearch = log.text.toLowerCase().includes(searchTerm);
+        const matchesLevel = levelFilter === 'all' || log.level === levelFilter;
+        return matchesSearch && matchesLevel;
+    });
+    
+    displayLogs();
+    updateLogStats();
+}
+
+/**
+ * Displays filtered logs in the container
+ */
+function displayLogs() {
+    const container = document.getElementById('logs-container');
+    
+    if (filteredLogs.length === 0) {
+        displayEmptyState();
+        return;
+    }
+    
+    const logElements = filteredLogs.map(log => createLogElement(log)).join('');
+    container.innerHTML = `<div class="p-3">${logElements}</div>`;
+    
+    // Auto-scroll if enabled
+    const autoScroll = document.getElementById('auto-scroll');
+    if (autoScroll.checked) {
+        scrollToBottom();
+    }
+}
+
+/**
+ * Creates a log element with proper styling
+ */
+function createLogElement(log) {
+    const levelIcons = {
+        error: 'fas fa-exclamation-circle',
+        warning: 'fas fa-exclamation-triangle',
+        info: 'fas fa-info-circle',
+        success: 'fas fa-check-circle'
+    };
+    
+    const levelColors = {
+        error: 'log-error',
+        warning: 'log-warning',
+        info: 'log-info',
+        success: 'log-success'
+    };
+    
+    const escapedText = escapeHtml(log.text);
+    const icon = levelIcons[log.level] || levelIcons.info;
+    const colorClass = levelColors[log.level] || levelColors.info;
+    
+    return `
+        <div class="log-entry ${colorClass} mb-2" data-level="${log.level}" data-timestamp="${log.timestamp}">
+            <div class="d-flex align-items-start gap-2">
+                <i class="${icon} mt-1" style="min-width: 16px;"></i>
+                <div class="flex-grow-1">
+                    <small class="text-muted me-2">[${log.timestamp}]</small>
+                    <span class="log-message">${escapedText}</span>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * Displays empty state
+ */
+function displayEmptyState() {
+    const container = document.getElementById('logs-container');
+    container.innerHTML = `
+        <div class="text-center py-5">
+            <i class="fas fa-file-alt text-muted fs-1 mb-3"></i>
+            <h5 class="text-muted">No logs available</h5>
+            <p class="text-muted">Start the bot to see activity logs here</p>
+        </div>
+    `;
+}
+
+/**
+ * Displays error state
+ */
+function displayErrorState() {
+    const container = document.getElementById('logs-container');
+    container.innerHTML = `
+        <div class="text-center py-5">
+            <i class="fas fa-exclamation-triangle text-warning fs-1 mb-3"></i>
+            <h5 class="text-warning">Unable to load logs</h5>
+            <p class="text-muted">Check your connection and try again</p>
+            <button class="btn btn-outline-primary" onclick="refreshLogs()">
+                <i class="fas fa-sync-alt me-1"></i>Retry
+            </button>
+        </div>
+    `;
+}
+
+/**
+ * Updates log statistics
+ */
+function updateLogStats() {
+    document.getElementById('visible-logs-count').textContent = filteredLogs.length;
+    document.getElementById('total-logs-count').textContent = allLogs.length;
+}
+
+/**
+ * Scrolls to the top of logs
+ */
+function scrollToTop() {
+    const container = document.getElementById('logs-container');
+    container.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+/**
+ * Scrolls to the bottom of logs
+ */
+function scrollToBottom() {
+    const container = document.getElementById('logs-container');
+    container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+}
+
+/**
+ * Clears all logs (client-side only)
+ */
+function clearLogs() {
+    if (confirm('Are you sure you want to clear all logs? This action cannot be undone.')) {
+        allLogs = [];
+        filteredLogs = [];
+        logCounts = { error: 0, warning: 0, info: 0, success: 0 };
+        updateLogCounts();
+        displayEmptyState();
+        updateLogStats();
+        showToast('Logs cleared successfully', 'info');
+    }
+}
+
+/**
+ * Downloads logs as a text file
+ */
+function downloadLogs() {
+    if (allLogs.length === 0) {
+        showToast('No logs to download', 'warning');
+        return;
+    }
+    
+    const logText = allLogs.map(log => `[${log.timestamp}] [${log.level.toUpperCase()}] ${log.text}`).join('\n');
+    const blob = new Blob([logText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `facebook-bot-logs-${new Date().toISOString().split('T')[0]}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    showToast('Logs downloaded successfully', 'success');
+}
+
+/**
+ * Toggles word wrap in log container
+ */
+function toggleWordWrap() {
+    const container = document.getElementById('logs-container');
+    container.style.whiteSpace = container.style.whiteSpace === 'nowrap' ? 'pre-wrap' : 'nowrap';
+    showToast('Word wrap toggled', 'info');
+}
+
+/**
+ * Toggles timestamp display
+ */
+function toggleTimestamps() {
+    const timestamps = document.querySelectorAll('.text-muted');
+    timestamps.forEach(ts => {
+        ts.style.display = ts.style.display === 'none' ? 'inline' : 'none';
+    });
+    showToast('Timestamps toggled', 'info');
+}
+
+/**
+ * Exports logs in JSON format
+ */
+function exportLogs() {
+    if (allLogs.length === 0) {
+        showToast('No logs to export', 'warning');
+        return;
+    }
+    
+    const exportData = {
+        exported_at: new Date().toISOString(),
+        total_logs: allLogs.length,
+        log_counts: logCounts,
+        logs: allLogs
+    };
+    
+    const jsonText = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([jsonText], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `facebook-bot-logs-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    showToast('Logs exported successfully', 'success');
+}
+
+/**
+ * Escapes HTML to prevent XSS
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Initialize page
+document.addEventListener('DOMContentLoaded', function() {
+    // Initial load
+    refreshLogs();
+    
+    // Set up auto-refresh
+    const autoRefreshCheckbox = document.getElementById('auto-refresh');
+    
+    function setupAutoRefresh() {
+        if (autoRefreshInterval) {
+            clearInterval(autoRefreshInterval);
+        }
+        
+        if (autoRefreshCheckbox.checked) {
+            autoRefreshInterval = setInterval(refreshLogs, 3000);
+        }
+    }
+    
+    autoRefreshCheckbox.addEventListener('change', setupAutoRefresh);
+    setupAutoRefresh();
+    
+    // Set up search debouncing
+    let searchTimeout;
+    document.getElementById('log-search').addEventListener('input', function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(filterLogs, 300);
+    });
+    
+    // Initialize stats
+    updateLogStats();
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', function() {
+    if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+    }
+});
+</script>
+{% endblock %}

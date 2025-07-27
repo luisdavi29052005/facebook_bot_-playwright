@@ -1,0 +1,689 @@
+
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- Page Header -->
+    <div class="page-header" data-aos="fade-up">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+            <div>
+                <h1 class="page-title">
+                    <i class="fas fa-cogs me-3"></i>Configuration
+                </h1>
+                <p class="page-subtitle">Configure webhook URLs, keywords, and bot behavior settings</p>
+            </div>
+            <a href="{{ url_for('dashboard') }}" class="btn btn-outline-primary">
+                <i class="fas fa-arrow-left me-2"></i>Back to Dashboard
+            </a>
+        </div>
+    </div>
+
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <!-- Configuration Form -->
+            <div class="card" data-aos="fade-up" data-aos-delay="200">
+                <div class="card-header">
+                    <h5>
+                        <i class="fas fa-tools text-primary"></i>
+                        Bot Configuration
+                    </h5>
+                    <small class="text-muted">Configure your bot settings and connection parameters</small>
+                </div>
+                <div class="card-body">
+                    <form id="config-form">
+                        <!-- Webhook Configuration Section -->
+                        <div class="config-section" data-aos="fade-up" data-aos-delay="300">
+                            <div class="section-title">
+                                <i class="fas fa-link text-primary"></i>
+                                n8n Webhook Configuration
+                                <i class="fas fa-question-circle tooltip-custom ms-2" 
+                                   data-tooltip="The webhook URL that will receive post data from the bot"></i>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <label for="webhook_url" class="form-label">
+                                    <i class="fas fa-globe me-2"></i>
+                                    Webhook URL
+                                    <span class="text-danger">*</span>
+                                </label>
+                                <div class="input-group">
+                                    <span class="input-group-text">
+                                        <i class="fas fa-link"></i>
+                                    </span>
+                                    <input type="url" 
+                                           class="form-control" 
+                                           id="webhook_url" 
+                                           name="webhook_url" 
+                                           value="{{ config.webhook_url if config.webhook_url != 'Não configurado' else '' }}" 
+                                           placeholder="https://your-n8n-instance.com/webhook/your-webhook-id"
+                                           required>
+                                    <button class="btn btn-outline-secondary" type="button" onclick="testWebhook()">
+                                        <i class="fas fa-vial me-1"></i>Test
+                                    </button>
+                                </div>
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    The n8n webhook endpoint that will receive and process post data
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Facebook Group Section -->
+                        <div class="config-section" data-aos="fade-up" data-aos-delay="400">
+                            <div class="section-title">
+                                <i class="fab fa-facebook text-primary"></i>
+                                Facebook Group Settings
+                                <i class="fas fa-question-circle tooltip-custom ms-2" 
+                                   data-tooltip="The Facebook group URL that the bot will monitor"></i>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <label for="group_url" class="form-label">
+                                    <i class="fab fa-facebook-square me-2"></i>
+                                    Group URL
+                                    <span class="text-danger">*</span>
+                                </label>
+                                <div class="input-group">
+                                    <span class="input-group-text">
+                                        <i class="fab fa-facebook"></i>
+                                    </span>
+                                    <input type="url" 
+                                           class="form-control" 
+                                           id="group_url" 
+                                           name="group_url" 
+                                           value="{{ config.group_url if config.group_url != 'Não configurado' else '' }}" 
+                                           placeholder="https://www.facebook.com/groups/your-group"
+                                           required>
+                                    <button class="btn btn-outline-secondary" type="button" onclick="validateGroupUrl()">
+                                        <i class="fas fa-check me-1"></i>Validate
+                                    </button>
+                                </div>
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    URL of the Facebook group to monitor for new posts
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Keywords and Filters Section -->
+                        <div class="config-section" data-aos="fade-up" data-aos-delay="500">
+                            <div class="section-title">
+                                <i class="fas fa-search text-purple"></i>
+                                Keywords & Filters
+                                <i class="fas fa-question-circle tooltip-custom ms-2" 
+                                   data-tooltip="The bot will only comment on posts containing these keywords"></i>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <label for="keywords" class="form-label">
+                                    <i class="fas fa-tags me-2"></i>
+                                    Keywords (comma-separated)
+                                </label>
+                                <div class="input-group">
+                                    <span class="input-group-text">
+                                        <i class="fas fa-search"></i>
+                                    </span>
+                                    <input type="text" 
+                                           class="form-control" 
+                                           id="keywords" 
+                                           name="keywords" 
+                                           value="{{ config.keywords | join(', ') if config.keywords else '' }}" 
+                                           placeholder="keyword1, keyword2, keyword3">
+                                    <button class="btn btn-outline-secondary" type="button" onclick="addSuggestedKeywords()">
+                                        <i class="fas fa-magic me-1"></i>Suggest
+                                    </button>
+                                </div>
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Leave empty to monitor all posts. Use comma-separated values for multiple keywords
+                                </div>
+                                
+                                <!-- Keyword Preview -->
+                                <div id="keywords-preview" class="mt-3">
+                                    <small class="text-muted fw-bold">Preview:</small>
+                                    <div id="keywords-badges" class="mt-2"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Bot Behavior Section -->
+                        <div class="config-section" data-aos="fade-up" data-aos-delay="600">
+                            <div class="section-title">
+                                <i class="fas fa-robot text-warning"></i>
+                                Bot Behavior Settings
+                                <i class="fas fa-question-circle tooltip-custom ms-2" 
+                                   data-tooltip="Configure how frequently the bot checks for new posts"></i>
+                            </div>
+                            
+                            <div class="row g-4">
+                                <div class="col-md-6">
+                                    <label for="interval" class="form-label">
+                                        <i class="fas fa-clock me-2"></i>
+                                        Check Interval (seconds)
+                                        <span class="text-danger">*</span>
+                                    </label>
+                                    <div class="input-group">
+                                        <span class="input-group-text">
+                                            <i class="fas fa-stopwatch"></i>
+                                        </span>
+                                        <input type="range" 
+                                               class="form-range" 
+                                               id="interval-range" 
+                                               min="30" 
+                                               max="3600" 
+                                               value="{{ config.interval or 60 }}"
+                                               oninput="updateIntervalDisplay(this.value)">
+                                        <input type="number" 
+                                               class="form-control" 
+                                               id="interval" 
+                                               name="interval" 
+                                               value="{{ config.interval or 60 }}" 
+                                               min="30" 
+                                               max="3600" 
+                                               required
+                                               style="max-width: 100px;">
+                                        <span class="input-group-text">sec</span>
+                                    </div>
+                                    <div class="form-text">
+                                        <i class="fas fa-info-circle me-1"></i>
+                                        Minimum: 30 seconds, Maximum: 1 hour
+                                    </div>
+                                    <div id="interval-recommendation" class="mt-2"></div>
+                                </div>
+                                
+                                <div class="col-md-6">
+                                    <label class="form-label">
+                                        <i class="fas fa-eye me-2"></i>
+                                        Browser Mode
+                                    </label>
+                                    <div class="d-flex gap-3">
+                                        <div class="form-check">
+                                            <input class="form-check-input" 
+                                                   type="radio" 
+                                                   name="headless" 
+                                                   id="headless-true" 
+                                                   value="true" 
+                                                   {{ 'checked' if config.headless else '' }}>
+                                            <label class="form-check-label" for="headless-true">
+                                                <i class="fas fa-eye-slash me-1"></i>
+                                                Headless (Background)
+                                            </label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" 
+                                                   type="radio" 
+                                                   name="headless" 
+                                                   id="headless-false" 
+                                                   value="false" 
+                                                   {{ 'checked' if not config.headless else '' }}>
+                                            <label class="form-check-label" for="headless-false">
+                                                <i class="fas fa-eye me-1"></i>
+                                                Visual (With Browser)
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="form-text">
+                                        <i class="fas fa-info-circle me-1"></i>
+                                        Headless mode uses less resources
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="d-flex justify-content-between align-items-center pt-4 border-top" data-aos="fade-up" data-aos-delay="700">
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn btn-outline-secondary" onclick="resetForm()">
+                                    <i class="fas fa-undo me-2"></i>Reset to Defaults
+                                </button>
+                                <button type="button" class="btn btn-outline-primary" onclick="previewConfig()">
+                                    <i class="fas fa-eye me-2"></i>Preview Changes
+                                </button>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn btn-secondary" onclick="window.history.back()">
+                                    <i class="fas fa-times me-2"></i>Cancel
+                                </button>
+                                <button type="submit" class="btn btn-primary btn-lg">
+                                    <i class="fas fa-save me-2"></i>Save Configuration
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Information Cards -->
+            <div class="row g-4 mt-4">
+                <!-- Best Practices -->
+                <div class="col-lg-6" data-aos="fade-up" data-aos-delay="800">
+                    <div class="card">
+                        <div class="card-header">
+                            <h5>
+                                <i class="fas fa-lightbulb text-warning"></i>
+                                Best Practices
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <ul class="list-unstyled">
+                                <li class="mb-3">
+                                    <i class="fas fa-check-circle text-success me-2"></i>
+                                    <strong>Keywords:</strong> Use specific, relevant keywords to avoid spam
+                                </li>
+                                <li class="mb-3">
+                                    <i class="fas fa-check-circle text-success me-2"></i>
+                                    <strong>Interval:</strong> Start with 60-120 seconds to avoid rate limiting
+                                </li>
+                                <li class="mb-3">
+                                    <i class="fas fa-check-circle text-success me-2"></i>
+                                    <strong>Testing:</strong> Always test your webhook before going live
+                                </li>
+                                <li class="mb-3">
+                                    <i class="fas fa-check-circle text-success me-2"></i>
+                                    <strong>Monitoring:</strong> Check logs regularly for any issues
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Technical Info -->
+                <div class="col-lg-6" data-aos="fade-up" data-aos-delay="900">
+                    <div class="card">
+                        <div class="card-header">
+                            <h5>
+                                <i class="fas fa-code text-info"></i>
+                                Technical Information
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="mb-3">
+                                <h6 class="fw-bold">
+                                    <i class="fas fa-webhook me-2"></i>Webhook Format
+                                </h6>
+                                <p class="text-muted small mb-2">The bot sends POST requests with this JSON structure:</p>
+                                <code class="d-block p-2 bg-dark text-light rounded small">
+{
+  "post_text": "content...",
+  "post_url": "https://...",
+  "keywords_found": ["keyword1"]
+}
+                                </code>
+                            </div>
+                            <div>
+                                <h6 class="fw-bold">
+                                    <i class="fas fa-reply me-2"></i>Expected Response
+                                </h6>
+                                <p class="text-muted small mb-2">Your webhook should return:</p>
+                                <code class="d-block p-2 bg-dark text-light rounded small">
+{
+  "reply": "Your comment text here"
+}
+                                </code>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let keywordsTimer;
+
+/**
+ * Handles form submission with validation and feedback
+ */
+document.getElementById('config-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    if (!validateForm()) {
+        return;
+    }
+    
+    const formData = new FormData(e.target);
+    const config = {
+        webhook_url: formData.get('webhook_url'),
+        group_url: formData.get('group_url'),
+        keywords: formData.get('keywords'),
+        interval: parseInt(formData.get('interval')),
+        headless: formData.get('headless') === 'true'
+    };
+    
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalText = submitBtn.innerHTML;
+    
+    // Show loading state
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="fas fa-spinner animate-spin me-2"></i>Saving Configuration...';
+    
+    fetch('/api/save-config', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(config)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showToast('Configuration saved successfully! 🎉', 'success');
+            
+            // Add success animation
+            submitBtn.classList.add('btn-success');
+            submitBtn.innerHTML = '<i class="fas fa-check me-2"></i>Saved Successfully!';
+            
+            // Update form with returned config to ensure consistency
+            if (data.config) {
+                updateFormWithConfig(data.config);
+            }
+            
+            // Notify parent window if in iframe or redirect after success
+            setTimeout(() => {
+                if (window.parent !== window) {
+                    window.parent.postMessage({ type: 'config-updated', config: data.config }, '*');
+                }
+                submitBtn.classList.remove('btn-success');
+                submitBtn.innerHTML = originalText;
+            }, 2000);
+        } else {
+            showToast(`Error saving configuration: ${data.message}`, 'error');
+        }
+    })
+    .catch(error => {
+        showToast('Network error while saving configuration', 'error');
+        console.error('Save config error:', error);
+    })
+    .finally(() => {
+        submitBtn.disabled = false;
+        if (!submitBtn.classList.contains('btn-success')) {
+            submitBtn.innerHTML = originalText;
+        }
+    });
+});
+
+/**
+ * Updates form fields with new configuration data
+ */
+function updateFormWithConfig(config) {
+    if (config.webhook_url && config.webhook_url !== 'Não configurado') {
+        document.getElementById('webhook_url').value = config.webhook_url;
+    }
+    
+    if (config.group_url && config.group_url !== 'Não configurado') {
+        document.getElementById('group_url').value = config.group_url;
+    }
+    
+    if (config.keywords && Array.isArray(config.keywords)) {
+        document.getElementById('keywords').value = config.keywords.join(', ');
+    }
+    
+    if (config.interval) {
+        document.getElementById('interval').value = config.interval;
+        document.getElementById('interval-range').value = config.interval;
+        updateIntervalDisplay(config.interval);
+    }
+    
+    if (typeof config.headless === 'boolean') {
+        document.getElementById('headless-true').checked = config.headless;
+        document.getElementById('headless-false').checked = !config.headless;
+    }
+    
+    updateKeywordsPreview();
+}
+
+/**
+ * Validates the entire form
+ */
+function validateForm() {
+    const webhookUrl = document.getElementById('webhook_url').value;
+    const groupUrl = document.getElementById('group_url').value;
+    const interval = parseInt(document.getElementById('interval').value);
+    
+    if (!webhookUrl) {
+        showToast('Webhook URL is required', 'error');
+        return false;
+    }
+    
+    if (!groupUrl) {
+        showToast('Facebook Group URL is required', 'error');
+        return false;
+    }
+    
+    if (interval < 30 || interval > 3600) {
+        showToast('Interval must be between 30 and 3600 seconds', 'error');
+        return false;
+    }
+    
+    return true;
+}
+
+/**
+ * Tests the webhook connectivity
+ */
+async function testWebhook() {
+    const webhookUrl = document.getElementById('webhook_url').value;
+    
+    if (!webhookUrl) {
+        showToast('Please enter a webhook URL first', 'warning');
+        return;
+    }
+    
+    const testBtn = event.target;
+    const originalText = testBtn.innerHTML;
+    
+    testBtn.disabled = true;
+    testBtn.innerHTML = '<i class="fas fa-spinner animate-spin me-1"></i>Testing...';
+    
+    try {
+        const response = await fetch('/api/test-webhook', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ webhook_url: webhookUrl })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast('Webhook test successful! ✅', 'success');
+            testBtn.classList.add('btn-success');
+            testBtn.innerHTML = '<i class="fas fa-check me-1"></i>Success';
+        } else {
+            showToast(`Webhook test failed: ${data.message}`, 'error');
+            testBtn.classList.add('btn-danger');
+            testBtn.innerHTML = '<i class="fas fa-times me-1"></i>Failed';
+        }
+    } catch (error) {
+        showToast('Network error during webhook test', 'error');
+        testBtn.classList.add('btn-danger');
+        testBtn.innerHTML = '<i class="fas fa-times me-1"></i>Error';
+    }
+    
+    setTimeout(() => {
+        testBtn.disabled = false;
+        testBtn.className = 'btn btn-outline-secondary';
+        testBtn.innerHTML = originalText;
+    }, 3000);
+}
+
+/**
+ * Validates Facebook group URL format
+ */
+function validateGroupUrl() {
+    const groupUrl = document.getElementById('group_url').value;
+    
+    if (!groupUrl) {
+        showToast('Please enter a group URL first', 'warning');
+        return;
+    }
+    
+    const validateBtn = event.target;
+    const originalText = validateBtn.innerHTML;
+    
+    validateBtn.disabled = true;
+    validateBtn.innerHTML = '<i class="fas fa-spinner animate-spin me-1"></i>Checking...';
+    
+    // Simple URL validation
+    try {
+        const url = new URL(groupUrl);
+        if (url.hostname.includes('facebook.com') && url.pathname.includes('/groups/')) {
+            showToast('Valid Facebook group URL format ✅', 'success');
+            validateBtn.classList.add('btn-success');
+            validateBtn.innerHTML = '<i class="fas fa-check me-1"></i>Valid';
+        } else {
+            showToast('Invalid Facebook group URL format', 'error');
+            validateBtn.classList.add('btn-danger');
+            validateBtn.innerHTML = '<i class="fas fa-times me-1"></i>Invalid';
+        }
+    } catch (error) {
+        showToast('Invalid URL format', 'error');
+        validateBtn.classList.add('btn-danger');
+        validateBtn.innerHTML = '<i class="fas fa-times me-1"></i>Invalid';
+    }
+    
+    setTimeout(() => {
+        validateBtn.disabled = false;
+        validateBtn.className = 'btn btn-outline-secondary';
+        validateBtn.innerHTML = originalText;
+    }, 3000);
+}
+
+/**
+ * Updates interval display and provides recommendations
+ */
+function updateIntervalDisplay(value) {
+    document.getElementById('interval').value = value;
+    
+    const recommendation = document.getElementById('interval-recommendation');
+    let message = '';
+    let className = '';
+    
+    if (value < 60) {
+        message = '⚠️ Very frequent - may trigger rate limits';
+        className = 'text-warning';
+    } else if (value < 120) {
+        message = '✅ Good balance between speed and safety';
+        className = 'text-success';
+    } else if (value < 300) {
+        message = 'ℹ️ Conservative approach - safe but slower';
+        className = 'text-info';
+    } else {
+        message = '⏰ Very slow - may miss time-sensitive posts';
+        className = 'text-secondary';
+    }
+    
+    recommendation.innerHTML = `<small class="${className}"><i class="fas fa-lightbulb me-1"></i>${message}</small>`;
+}
+
+/**
+ * Updates keywords preview in real-time
+ */
+function updateKeywordsPreview() {
+    const keywords = document.getElementById('keywords').value;
+    const badgesContainer = document.getElementById('keywords-badges');
+    
+    if (keywords.trim()) {
+        const keywordArray = keywords.split(',').map(k => k.trim()).filter(k => k);
+        const badges = keywordArray.map(keyword => 
+            `<span class="badge bg-primary me-1 mb-1 px-3 py-2" style="border-radius: 20px;">
+                <i class="fas fa-tag me-1"></i>${keyword}
+            </span>`
+        ).join('');
+        
+        badgesContainer.innerHTML = badges;
+    } else {
+        badgesContainer.innerHTML = '<span class="text-muted"><i class="fas fa-info-circle me-1"></i>All posts will be monitored</span>';
+    }
+}
+
+/**
+ * Suggests popular keywords
+ */
+function addSuggestedKeywords() {
+    const suggestions = ['ajuda', 'dúvida', 'problema', 'questão', 'pergunta', 'suporte'];
+    const currentKeywords = document.getElementById('keywords').value;
+    
+    if (currentKeywords.trim()) {
+        document.getElementById('keywords').value = currentKeywords + ', ' + suggestions.join(', ');
+    } else {
+        document.getElementById('keywords').value = suggestions.join(', ');
+    }
+    
+    updateKeywordsPreview();
+    showToast('Suggested keywords added!', 'info');
+}
+
+/**
+ * Resets form to default values
+ */
+function resetForm() {
+    if (confirm('Are you sure you want to reset all settings to defaults?')) {
+        document.getElementById('config-form').reset();
+        updateKeywordsPreview();
+        updateIntervalDisplay(60);
+        showToast('Form reset to defaults', 'info');
+    }
+}
+
+/**
+ * Shows a preview of the current configuration
+ */
+function previewConfig() {
+    const form = document.getElementById('config-form');
+    const formData = new FormData(form);
+    
+    const config = {
+        webhook_url: formData.get('webhook_url') || 'Not configured',
+        group_url: formData.get('group_url') || 'Not configured',
+        keywords: formData.get('keywords') || 'All posts',
+        interval: formData.get('interval') + ' seconds',
+        headless: formData.get('headless') === 'true' ? 'Headless' : 'Visual'
+    };
+    
+    let preview = '<strong>Configuration Preview:</strong><br><br>';
+    for (const [key, value] of Object.entries(config)) {
+        preview += `<strong>${key.replace('_', ' ').toUpperCase()}:</strong> ${value}<br>`;
+    }
+    
+    showToast(preview, 'info', 8000);
+}
+
+// Initialize page
+document.addEventListener('DOMContentLoaded', function() {
+    // Update interval display on page load
+    const currentInterval = document.getElementById('interval').value;
+    updateIntervalDisplay(currentInterval);
+    
+    // Initialize keywords preview
+    updateKeywordsPreview();
+    
+    // Add real-time keywords preview
+    document.getElementById('keywords').addEventListener('input', function() {
+        clearTimeout(keywordsTimer);
+        keywordsTimer = setTimeout(updateKeywordsPreview, 300);
+    });
+    
+    // Sync range slider with number input
+    document.getElementById('interval').addEventListener('input', function() {
+        document.getElementById('interval-range').value = this.value;
+        updateIntervalDisplay(this.value);
+    });
+    
+    // Add form validation feedback
+    const inputs = document.querySelectorAll('input[required]');
+    inputs.forEach(input => {
+        input.addEventListener('blur', function() {
+            if (this.value.trim() === '') {
+                this.classList.add('is-invalid');
+            } else {
+                this.classList.remove('is-invalid');
+                this.classList.add('is-valid');
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

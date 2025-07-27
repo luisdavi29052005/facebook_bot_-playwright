@@ -1,0 +1,610 @@
+
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- Page Header -->
+    <div class="page-header" data-aos="fade-up">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+            <div>
+                <h1 class="page-title">
+                    <i class="fas fa-robot me-3"></i>Dashboard
+                </h1>
+                <p class="page-subtitle">Monitor and control your Facebook Bot with real-time insights</p>
+            </div>
+            <div id="status-badge" class="status-badge status-stopped">
+                <span class="status-indicator status-stopped"></span>
+                Status: Parado
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Stats Row -->
+    <div class="row g-4 mb-5">
+        <div class="col-lg-3 col-md-6" data-aos="fade-up" data-aos-delay="100">
+            <div class="stats-card">
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <div class="p-3 rounded-3" style="background: rgba(14, 165, 233, 0.1);">
+                        <i class="fas fa-file-alt text-primary fs-4"></i>
+                    </div>
+                    <small class="text-success fw-bold">+12%</small>
+                </div>
+                <h3 id="posts-count" class="text-primary">0</h3>
+                <small class="text-muted fw-medium">Posts Processados</small>
+            </div>
+        </div>
+        
+        <div class="col-lg-3 col-md-6" data-aos="fade-up" data-aos-delay="200">
+            <div class="stats-card">
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <div class="p-3 rounded-3" style="background: rgba(16, 185, 129, 0.1);">
+                        <i class="fas fa-comments text-success fs-4"></i>
+                    </div>
+                    <small class="text-success fw-bold">+8%</small>
+                </div>
+                <h3 id="comments-count" class="text-success">0</h3>
+                <small class="text-muted fw-medium">Comentários Enviados</small>
+            </div>
+        </div>
+        
+        <div class="col-lg-3 col-md-6" data-aos="fade-up" data-aos-delay="300">
+            <div class="stats-card">
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <div class="p-3 rounded-3" style="background: rgba(245, 158, 11, 0.1);">
+                        <i class="fas fa-clock text-warning fs-4"></i>
+                    </div>
+                    <small class="text-warning fw-bold">Live</small>
+                </div>
+                <h3 id="uptime" class="text-warning">--</h3>
+                <small class="text-muted fw-medium">Tempo Ativo</small>
+            </div>
+        </div>
+        
+        <div class="col-lg-3 col-md-6" data-aos="fade-up" data-aos-delay="400">
+            <div class="stats-card">
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <div class="p-3 rounded-3" style="background: rgba(139, 92, 246, 0.1);">
+                        <i class="fas fa-tachometer-alt text-purple fs-4"></i>
+                    </div>
+                    <span id="n8n-status" class="status-indicator status-warning"></span>
+                </div>
+                <h3 class="text-purple">API</h3>
+                <small class="text-muted fw-medium">n8n Webhook Status</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Control Panel -->
+    <div class="row g-4 mb-5">
+        <!-- Bot Controls -->
+        <div class="col-lg-6" data-aos="fade-up" data-aos-delay="500">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h5>
+                        <i class="fas fa-play-circle text-primary"></i>
+                        Bot Controls
+                    </h5>
+                    <small class="text-muted">Start, stop and configure your bot</small>
+                </div>
+                <div class="card-body">
+                    <div class="d-grid gap-3 mb-4">
+                        <button id="start-btn" class="btn btn-success btn-lg" onclick="startBot()">
+                            <i class="fas fa-play me-2"></i>
+                            Start Bot
+                            <span class="ms-auto">
+                                <i class="fas fa-rocket"></i>
+                            </span>
+                        </button>
+                        
+                        <button id="stop-btn" class="btn btn-danger btn-lg" onclick="stopBot()" disabled>
+                            <i class="fas fa-stop me-2"></i>
+                            Stop Bot
+                            <span class="ms-auto">
+                                <i class="fas fa-hand-paper"></i>
+                            </span>
+                        </button>
+                        
+                        <a href="{{ url_for('config') }}" class="btn btn-outline-primary btn-lg">
+                            <i class="fas fa-cog me-2"></i>
+                            Configure Settings
+                            <span class="ms-auto">
+                                <i class="fas fa-arrow-right"></i>
+                            </span>
+                        </a>
+                    </div>
+                    
+                    <!-- Bot Message Area -->
+                    <div id="bot-message"></div>
+                    
+                    <!-- Quick Actions -->
+                    <div class="mt-4 pt-4 border-top">
+                        <h6 class="fw-bold mb-3">
+                            <i class="fas fa-bolt me-2"></i>Quick Actions
+                        </h6>
+                        <div class="d-flex gap-2 flex-wrap">
+                            <button class="btn btn-sm btn-outline-primary" onclick="updateStatus()">
+                                <i class="fas fa-sync-alt me-1"></i>Refresh
+                            </button>
+                            <a href="{{ url_for('logs') }}" class="btn btn-sm btn-outline-secondary">
+                                <i class="fas fa-external-link-alt me-1"></i>View Logs
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Real-time Activity -->
+        <div class="col-lg-6" data-aos="fade-up" data-aos-delay="600">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <div>
+                        <h5>
+                            <i class="fas fa-chart-line text-success"></i>
+                            Real-time Activity
+                        </h5>
+                        <small class="text-muted">Live monitoring and recent logs</small>
+                    </div>
+                    <button class="btn btn-sm btn-outline-primary" onclick="updateStatus()">
+                        <i class="fas fa-sync-alt"></i>
+                    </button>
+                </div>
+                <div class="card-body">
+                    <div class="log-container" id="recent-logs" style="height: 250px; overflow-y: auto;">
+                        <div class="text-center text-muted py-4">
+                            <i class="fas fa-spinner animate-spin mb-2"></i>
+                            <div>Loading activity logs...</div>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-3 d-flex justify-content-between align-items-center">
+                        <small class="text-muted">
+                            <i class="fas fa-clock me-1"></i>
+                            Auto-refreshes every 5 seconds
+                        </small>
+                        <a href="{{ url_for('logs') }}" class="btn btn-sm btn-outline-primary">
+                            <i class="fas fa-external-link-alt me-1"></i>
+                            Full Logs
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Configuration Overview -->
+    <div class="row g-4">
+        <div class="col-12" data-aos="fade-up" data-aos-delay="700">
+            <div class="card">
+                <div class="card-header">
+                    <h5>
+                        <i class="fas fa-cogs text-purple"></i>
+                        System Configuration
+                    </h5>
+                    <small class="text-muted">Current bot settings and connection status</small>
+                </div>
+                <div class="card-body">
+                    <div class="row g-4">
+                        <!-- Webhook Configuration -->
+                        <div class="col-lg-6">
+                            <div class="config-section">
+                                <div class="section-title">
+                                    <i class="fas fa-link text-primary"></i>
+                                    n8n Webhook
+                                    <span id="webhook-status" class="status-indicator status-warning ms-auto"></span>
+                                </div>
+                                <div class="webhook-display">
+                                    {% if config.webhook_url and config.webhook_url != 'Não configurado' %}
+                                        <code class="text-primary">{{ config.webhook_url[:50] }}...</code>
+                                    {% else %}
+                                        <span class="text-warning">
+                                            <i class="fas fa-exclamation-triangle me-1"></i>
+                                            Not configured
+                                        </span>
+                                    {% endif %}
+                                </div>
+                                <small class="text-muted">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Webhook endpoint for processing posts
+                                </small>
+                            </div>
+                        </div>
+
+                        <!-- Facebook Group -->
+                        <div class="col-lg-6">
+                            <div class="config-section">
+                                <div class="section-title">
+                                    <i class="fab fa-facebook text-primary"></i>
+                                    Facebook Group
+                                </div>
+                                <div class="group-display">
+                                    {% if config.group_url and config.group_url != 'Não configurado' %}
+                                        <code class="text-success">{{ config.group_url[:50] }}...</code>
+                                    {% else %}
+                                        <span class="text-warning">
+                                            <i class="fas fa-exclamation-triangle me-1"></i>
+                                            Not configured
+                                        </span>
+                                    {% endif %}
+                                </div>
+                                <small class="text-muted">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Target Facebook group to monitor
+                                </small>
+                            </div>
+                        </div>
+
+                        <!-- Keywords -->
+                        <div class="col-lg-8">
+                            <div class="config-section">
+                                <div class="section-title">
+                                    <i class="fas fa-search text-purple"></i>
+                                    Keywords & Filters
+                                </div>
+                                <div class="keywords-display mb-2">
+                                    {% if config.keywords %}
+                                        {% for keyword in config.keywords %}
+                                            <span class="badge bg-primary me-1 mb-1 px-3 py-2" style="border-radius: 20px;">
+                                                <i class="fas fa-tag me-1"></i>{{ keyword }}
+                                            </span>
+                                        {% endfor %}
+                                    {% else %}
+                                        <span class="text-muted">
+                                            <i class="fas fa-info-circle me-1"></i>
+                                            No keywords configured - monitoring all posts
+                                        </span>
+                                    {% endif %}
+                                </div>
+                                <small class="text-muted">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Bot will only comment on posts containing these keywords
+                                </small>
+                            </div>
+                        </div>
+
+                        <!-- Settings -->
+                        <div class="col-lg-4">
+                            <div class="config-section">
+                                <div class="section-title">
+                                    <i class="fas fa-sliders-h text-warning"></i>
+                                    Bot Settings
+                                </div>
+                                <div class="d-flex align-items-center justify-content-between mb-2">
+                                    <span class="text-muted">Interval:</span>
+                                    <span class="interval-display fw-bold text-warning">{{ config.interval }}s</span>
+                                </div>
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <span class="text-muted">Mode:</span>
+                                    {% if config.headless %}
+                                        <span class="text-success fw-bold">
+                                            <i class="fas fa-eye-slash me-1"></i>Headless
+                                        </span>
+                                    {% else %}
+                                        <span class="text-warning fw-bold">
+                                            <i class="fas fa-eye me-1"></i>Visual
+                                        </span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Action Bar -->
+                    <div class="mt-4 pt-4 border-top d-flex justify-content-between align-items-center">
+                        <div class="d-flex align-items-center gap-3">
+                            <small class="text-muted">
+                                <i class="fas fa-sync-alt me-1"></i>
+                                Last updated: <span id="last-config-update">Just now</span>
+                            </small>
+                        </div>
+                        <a href="{{ url_for('config') }}" class="btn btn-primary">
+                            <i class="fas fa-edit me-2"></i>
+                            Edit Configuration
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let statusInterval;
+let startTime = null;
+
+/**
+ * Updates the dashboard status and statistics
+ */
+function updateStatus() {
+    fetch('/api/status')
+        .then(response => response.json())
+        .then(data => {
+            updateStatusBadge(data.bot_running);
+            updateButtonStates(data.bot_running);
+            updateHealthStatus(data.n8n_healthy);
+            updateStatistics(data);
+            updateConfigDisplay(data.config);
+            updateActivityLogs(data.logs);
+            updateLastUpdate();
+        })
+        .catch(error => {
+            console.error('Error updating status:', error);
+            showToast('Connection error with server', 'error');
+        });
+}
+
+/**
+ * Updates the main status badge
+ */
+function updateStatusBadge(isRunning) {
+    const statusBadge = document.getElementById('status-badge');
+    
+    if (isRunning) {
+        statusBadge.className = 'status-badge status-running';
+        statusBadge.innerHTML = '<span class="status-indicator status-running"></span>Status: Running';
+        if (!startTime) startTime = Date.now();
+    } else {
+        statusBadge.className = 'status-badge status-stopped';
+        statusBadge.innerHTML = '<span class="status-indicator status-stopped"></span>Status: Stopped';
+        startTime = null;
+    }
+}
+
+/**
+ * Updates button states based on bot status
+ */
+function updateButtonStates(isRunning) {
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    
+    startBtn.disabled = isRunning;
+    stopBtn.disabled = !isRunning;
+    
+    if (isRunning) {
+        startBtn.innerHTML = '<i class="fas fa-check me-2"></i>Bot Running <span class="ms-auto"><i class="fas fa-check-circle"></i></span>';
+        stopBtn.innerHTML = '<i class="fas fa-stop me-2"></i>Stop Bot <span class="ms-auto"><i class="fas fa-hand-paper"></i></span>';
+    } else {
+        startBtn.innerHTML = '<i class="fas fa-play me-2"></i>Start Bot <span class="ms-auto"><i class="fas fa-rocket"></i></span>';
+        stopBtn.innerHTML = '<i class="fas fa-stop me-2"></i>Stop Bot <span class="ms-auto"><i class="fas fa-hand-paper"></i></span>';
+    }
+}
+
+/**
+ * Updates health status indicators
+ */
+function updateHealthStatus(n8nHealthy) {
+    const indicators = ['n8n-status', 'webhook-status'];
+    
+    indicators.forEach(id => {
+        const indicator = document.getElementById(id);
+        if (indicator) {
+            indicator.className = n8nHealthy ? 
+                'status-indicator status-running' : 
+                'status-indicator status-warning';
+        }
+    });
+}
+
+/**
+ * Updates statistics display
+ */
+function updateStatistics(data) {
+    document.getElementById('posts-count').textContent = data.processed_posts || 0;
+    document.getElementById('comments-count').textContent = data.stats?.comments_sent || 0;
+    
+    // Update uptime
+    if (startTime) {
+        const uptime = Math.floor((Date.now() - startTime) / 1000);
+        const hours = Math.floor(uptime / 3600);
+        const minutes = Math.floor((uptime % 3600) / 60);
+        const seconds = uptime % 60;
+        
+        if (hours > 0) {
+            document.getElementById('uptime').textContent = `${hours}h ${minutes}m`;
+        } else if (minutes > 0) {
+            document.getElementById('uptime').textContent = `${minutes}m ${seconds}s`;
+        } else {
+            document.getElementById('uptime').textContent = `${seconds}s`;
+        }
+    } else {
+        document.getElementById('uptime').textContent = '--';
+    }
+}
+
+/**
+ * Updates configuration display in real-time
+ */
+function updateConfigDisplay(config) {
+    if (!config) return;
+    
+    // Update webhook URL
+    const webhookDisplay = document.querySelector('.webhook-display');
+    if (webhookDisplay && config.webhook_url) {
+        if (config.webhook_url !== 'Não configurado') {
+            webhookDisplay.innerHTML = `<code class="text-primary">${config.webhook_url.substring(0, 50)}...</code>`;
+        } else {
+            webhookDisplay.innerHTML = '<span class="text-warning"><i class="fas fa-exclamation-triangle me-1"></i>Not configured</span>';
+        }
+    }
+
+    // Update group URL
+    const groupDisplay = document.querySelector('.group-display');
+    if (groupDisplay && config.group_url) {
+        if (config.group_url !== 'Não configurado') {
+            groupDisplay.innerHTML = `<code class="text-success">${config.group_url.substring(0, 50)}...</code>`;
+        } else {
+            groupDisplay.innerHTML = '<span class="text-warning"><i class="fas fa-exclamation-triangle me-1"></i>Not configured</span>';
+        }
+    }
+
+    // Update keywords
+    const keywordsDisplay = document.querySelector('.keywords-display');
+    if (keywordsDisplay && config.keywords) {
+        if (config.keywords.length > 0) {
+            keywordsDisplay.innerHTML = config.keywords.map(k => 
+                `<span class="badge bg-primary me-1 mb-1 px-3 py-2" style="border-radius: 20px;">
+                    <i class="fas fa-tag me-1"></i>${escapeHtml(k)}
+                </span>`
+            ).join('');
+        } else {
+            keywordsDisplay.innerHTML = '<span class="text-muted"><i class="fas fa-info-circle me-1"></i>No keywords configured - monitoring all posts</span>';
+        }
+    }
+
+    // Update interval
+    const intervalDisplay = document.querySelector('.interval-display');
+    if (intervalDisplay && config.interval) {
+        intervalDisplay.textContent = `${config.interval}s`;
+    }
+}
+
+/**
+ * Updates activity logs with syntax highlighting
+ */
+function updateActivityLogs(logs) {
+    const logsContainer = document.getElementById('recent-logs');
+    
+    if (logs && logs.length > 0) {
+        const formattedLogs = logs.map(log => {
+            const escapedLog = escapeHtml(log);
+            let logClass = 'log-line text-light';
+            
+            if (log.includes('[ERROR]') || log.includes('ERROR') || log.includes('❌')) {
+                logClass = 'log-line log-error';
+            } else if (log.includes('[WARNING]') || log.includes('WARNING') || log.includes('⚠️')) {
+                logClass = 'log-line log-warning';
+            } else if (log.includes('[INFO]') || log.includes('INFO') || log.includes('ℹ️')) {
+                logClass = 'log-line log-info';
+            } else if (log.includes('[SUCCESS]') || log.includes('SUCCESS') || log.includes('✅')) {
+                logClass = 'log-line log-success';
+            }
+            
+            return `<div class="${logClass}">${escapedLog}</div>`;
+        }).join('');
+        
+        logsContainer.innerHTML = formattedLogs;
+        logsContainer.scrollTop = logsContainer.scrollHeight;
+    } else {
+        logsContainer.innerHTML = `
+            <div class="text-center text-muted py-4">
+                <i class="fas fa-info-circle mb-2"></i>
+                <div>No recent activity</div>
+            </div>
+        `;
+    }
+}
+
+/**
+ * Updates last update timestamp
+ */
+function updateLastUpdate() {
+    const timestamp = document.getElementById('last-config-update');
+    if (timestamp) {
+        timestamp.textContent = new Date().toLocaleTimeString('pt-BR');
+    }
+}
+
+/**
+ * Escapes HTML to prevent XSS
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
+ * Starts the bot with enhanced feedback
+ */
+function startBot() {
+    const startBtn = document.getElementById('start-btn');
+    startBtn.disabled = true;
+    startBtn.innerHTML = '<i class="fas fa-spinner animate-spin me-2"></i>Starting... <span class="ms-auto"><i class="fas fa-cog animate-spin"></i></span>';
+
+    fetch('/api/start', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showToast('Bot started successfully! 🚀', 'success');
+                startTime = Date.now();
+            } else {
+                showToast(`Failed to start bot: ${data.message}`, 'error');
+            }
+            
+            setTimeout(() => {
+                updateStatus();
+            }, 1000);
+        })
+        .catch(error => {
+            showToast('Connection error while starting bot', 'error');
+            startBtn.disabled = false;
+            startBtn.innerHTML = '<i class="fas fa-play me-2"></i>Start Bot <span class="ms-auto"><i class="fas fa-rocket"></i></span>';
+        });
+}
+
+/**
+ * Stops the bot with enhanced feedback
+ */
+function stopBot() {
+    const stopBtn = document.getElementById('stop-btn');
+    stopBtn.disabled = true;
+    stopBtn.innerHTML = '<i class="fas fa-spinner animate-spin me-2"></i>Stopping... <span class="ms-auto"><i class="fas fa-cog animate-spin"></i></span>';
+
+    fetch('/api/stop', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showToast('Bot stopped successfully', 'success');
+                startTime = null;
+            } else {
+                showToast(`Failed to stop bot: ${data.message}`, 'error');
+            }
+            
+            setTimeout(() => {
+                updateStatus();
+            }, 1000);
+        });
+}
+
+// Initialize dashboard
+document.addEventListener('DOMContentLoaded', function() {
+    updateStatus();
+    statusInterval = setInterval(updateStatus, 5000);
+    
+    // Initialize last update time
+    updateLastUpdate();
+    
+    // Add smooth transitions to stats cards
+    const statsCards = document.querySelectorAll('.stats-card');
+    statsCards.forEach((card, index) => {
+        card.style.animationDelay = `${index * 0.1}s`;
+    });
+    
+    // Listen for configuration updates from config page
+    window.addEventListener('message', function(event) {
+        if (event.data.type === 'config-updated') {
+            // Update dashboard immediately when config changes
+            setTimeout(() => {
+                updateStatus();
+                showToast('Configuration updated! Dashboard refreshed.', 'info');
+            }, 500);
+        }
+    });
+});
+
+// Force update configuration display when page gains focus
+window.addEventListener('focus', function() {
+    // Update immediately when user returns to dashboard
+    updateStatus();
+});
+
+// Cleanup interval on page unload
+window.addEventListener('beforeunload', function() {
+    if (statusInterval) {
+        clearInterval(statusInterval);
+    }
+});
+</script>
+{% endblock %}
