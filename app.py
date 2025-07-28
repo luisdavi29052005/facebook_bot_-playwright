@@ -1,3 +1,4 @@
+
 from flask import Flask, render_template, jsonify, request
 import json
 import os
@@ -9,9 +10,10 @@ from datetime import datetime
 import importlib
 import sys
 import asyncio
+import tempfile
 
 # Importar módulos do bot
-from main import main_loop
+from main import main_loop, stop_event
 from logger import setup_logging, bot_logger
 from state_manager import StateManager
 from fb_bot.config import BotConfig
@@ -33,6 +35,9 @@ bot_stats = {
 _config_cache = None
 _config_cache_time = 0
 _n8n_status_cache = {'healthy': False, 'last_check': 0}
+
+# Lock para config saving
+config_lock = threading.Lock()
 
 def get_config(force_reload=False):
     """Obtém configurações com cache."""
@@ -81,6 +86,14 @@ def read_recent_logs(lines=30):
     except Exception as e:
         return [f"Erro ao ler logs: {str(e)}"]
 
+async def check_n8n_health_async(config):
+    """Verifica saúde do n8n de forma assíncrona."""
+    try:
+        from fb_bot.n8n_client import healthcheck_n8n
+        return await healthcheck_n8n(config.n8n_webhook_url)
+    except Exception:
+        return False
+
 def check_n8n_health(config):
     """Verifica saúde do n8n com cache otimizado."""
     global _n8n_status_cache
@@ -92,9 +105,12 @@ def check_n8n_health(config):
         return _n8n_status_cache['healthy']
 
     try:
-        from fb_bot.n8n_client import healthcheck_n8n
-        _n8n_status_cache['healthy'] = healthcheck_n8n(config.n8n_webhook_url)
+        # Run async check in thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _n8n_status_cache['healthy'] = loop.run_until_complete(check_n8n_health_async(config))
         _n8n_status_cache['last_check'] = current_time
+        loop.close()
     except Exception:
         _n8n_status_cache['healthy'] = False
 
@@ -154,7 +170,7 @@ def api_status():
 
 @app.route('/api/save-config', methods=['POST'])
 def save_config():
-    """Salvar configurações."""
+    """Salvar configurações com escrita atômica."""
     try:
         data = request.get_json()
 
@@ -174,38 +190,50 @@ def save_config():
             return jsonify({'success': False, 'message': 'URL do grupo é obrigatória'})
         if interval < 30:
             return jsonify({'success': False, 'message': 'Intervalo mínimo é 30 segundos'})
+        if interval > 3600:
+            return jsonify({'success': False, 'message': 'Intervalo máximo é 3600 segundos'})
 
-        # Salvar no .env
-        env_vars = {
-            'N8N_WEBHOOK_URL': webhook_url,
-            'FACEBOOK_GROUP_URL': group_url,
-            'KEYWORDS': json.dumps(keywords),
-            'LOOP_INTERVAL_SECONDS': str(interval),
-            'HEADLESS': str(headless).lower()
-        }
+        # Salvar no .env com escrita atômica
+        with config_lock:
+            env_vars = {
+                'N8N_WEBHOOK_URL': webhook_url,
+                'FACEBOOK_GROUP_URL': group_url,
+                'KEYWORDS': json.dumps(keywords),
+                'LOOP_INTERVAL_SECONDS': str(interval),
+                'HEADLESS': str(headless).lower()
+            }
 
-        # Ler .env existente
-        env_content = {}
-        if os.path.exists('.env'):
-            with open('.env', 'r') as f:
-                for line in f:
-                    if '=' in line and not line.startswith('#'):
-                        key, value = line.strip().split('=', 1)
-                        env_content[key] = value
+            # Ler .env existente
+            env_content = {}
+            if os.path.exists('.env'):
+                with open('.env', 'r') as f:
+                    for line in f:
+                        if '=' in line and not line.startswith('#'):
+                            key, value = line.strip().split('=', 1)
+                            env_content[key] = value
 
-        # Atualizar
-        env_content.update(env_vars)
+            # Atualizar
+            env_content.update(env_vars)
 
-        # Escrever
-        with open('.env', 'w') as f:
-            for key, value in env_content.items():
-                f.write(f'{key}={value}\n')
+            # Escrever atomicamente usando arquivo temporário
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, dir='.', suffix='.env.tmp') as tmp_file:
+                for key, value in env_content.items():
+                    tmp_file.write(f'{key}={value}\n')
+                tmp_file.flush()
+                
+                # Renomear para .env (operação atômica)
+                os.replace(tmp_file.name, '.env')
 
-        # Invalidar cache
-        global _config_cache
-        _config_cache = None
+            # Invalidar cache e recarregar config
+            global _config_cache
+            _config_cache = None
+            new_config = get_config(force_reload=True)
+            
+            # Recarregar módulo de config
+            if 'fb_bot.config' in sys.modules:
+                importlib.reload(sys.modules['fb_bot.config'])
 
-        bot_logger.success(f"Configurações atualizadas: {len(keywords)} palavras-chave, intervalo {interval}s")
+        bot_logger.info(f"Configurações atualizadas: {len(keywords)} palavras-chave, intervalo {interval}s")
 
         return jsonify({
             'success': True, 
@@ -218,10 +246,11 @@ def save_config():
 
 @app.route('/api/start', methods=['POST'])
 def start_bot():
-    """Iniciar bot."""
+    """Iniciar bot com verificação de thread existente."""
     global bot_thread, bot_running
 
-    if bot_running:
+    # Verificar se já está rodando
+    if bot_thread and bot_thread.is_alive():
         return jsonify({'success': False, 'message': 'Bot já está rodando'})
 
     config = get_config(force_reload=True)
@@ -232,6 +261,9 @@ def start_bot():
 
     if not check_n8n_health(config):
         return jsonify({'success': False, 'message': 'n8n não está acessível'})
+
+    # Limpar stop event
+    stop_event.clear()
 
     # Iniciar bot
     bot_thread = threading.Thread(target=run_bot_wrapper, daemon=True)
@@ -247,13 +279,26 @@ def start_bot():
 
 @app.route('/api/stop', methods=['POST'])
 def stop_bot():
-    """Parar bot."""
-    global bot_running
+    """Parar bot com join e timeout."""
+    global bot_running, bot_thread
 
+    # Setar stop event
+    stop_event.set()
     bot_running = False
     bot_stats['start_time'] = None
-    bot_logger.info("Bot parado pelo usuário")
+    
+    # Fazer join com timeout se thread existe
+    if bot_thread and bot_thread.is_alive():
+        bot_thread.join(timeout=30)
+        if bot_thread.is_alive():
+            bot_logger.warning("Thread do bot não finalizou no timeout")
+            return jsonify({
+                'success': True, 
+                'message': 'Bot parado (timeout na finalização)',
+                'status': 'warning'
+            })
 
+    bot_logger.info("Bot parado pelo usuário")
     return jsonify({'success': True, 'message': 'Bot parado'})
 
 @app.route('/api/test-webhook', methods=['POST'])
@@ -266,12 +311,21 @@ def test_webhook():
         if not webhook_url:
             return jsonify({'success': False, 'message': 'URL obrigatória'})
 
-        from fb_bot.n8n_client import healthcheck_n8n
-
-        if healthcheck_n8n(webhook_url):
-            return jsonify({'success': True, 'message': 'Webhook funcionando'})
-        else:
-            return jsonify({'success': False, 'message': 'Webhook não acessível'})
+        # Run async test in thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            from fb_bot.n8n_client import healthcheck_n8n
+            result = loop.run_until_complete(healthcheck_n8n(webhook_url))
+            
+            if result:
+                return jsonify({'success': True, 'message': 'Webhook funcionando'})
+            else:
+                return jsonify({'success': False, 'message': 'Webhook não acessível'})
+        finally:
+            loop.close()
+            
     except Exception as e:
         return jsonify({'success': False, 'message': f'Erro: {str(e)}'})
 
@@ -281,7 +335,7 @@ def run_bot_wrapper():
 
     try:
         bot_running = True
-        bot_logger.success("Bot iniciado")
+        bot_logger.info("Bot iniciado")
         asyncio.run(main_loop())
     except Exception as e:
         bot_logger.error(f"Erro no bot: {e}")

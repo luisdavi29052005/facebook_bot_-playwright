@@ -232,6 +232,59 @@ async def wait_post_ready(post: Locator):
     except Exception as e:
         bot_logger.debug(f"Erro aguardando post pronto: {e}")
 
+async def encontrar_posts_visiveis(page: Page) -> list:
+    """Encontra posts visíveis na página atual."""
+    article_selectors = [
+        'div[data-pagelet^="FeedUnit_"]',
+        'div[role="article"]',
+        'article[role="article"]',
+        'div[class*="x1yztbdb"]',
+        'div:has(time[datetime])'
+    ]
+    
+    all_articles = []
+    for selector in article_selectors:
+        try:
+            articles = page.locator(selector)
+            count = await articles.count()
+            
+            if count > 0:
+                for i in range(count):
+                    article = articles.nth(i)
+                    if await article.is_visible():
+                        all_articles.append(article)
+                break  # Usar primeiro seletor que funcionar
+        except Exception:
+            continue
+    
+    return all_articles
+
+async def rolar_pagina(page: Page, distance: int = 1200):
+    """Rola a página para carregar mais conteúdo."""
+    try:
+        await page.mouse.wheel(0, distance)
+        await asyncio.sleep(1.5)
+    except Exception as e:
+        bot_logger.debug(f"Erro ao rolar página: {e}")
+
+async def coletar_detalhes_do_post(article) -> dict:
+    """Coleta detalhes básicos do post para validação."""
+    try:
+        # Aguardar post estar pronto
+        await wait_post_ready(article)
+        
+        # Obter conteúdo básico
+        text_content = await article.text_content() or ""
+        
+        return {
+            'element': article,
+            'text_length': len(text_content.strip()),
+            'has_content': len(text_content.strip()) >= 20
+        }
+    except Exception as e:
+        bot_logger.debug(f"Erro ao coletar detalhes: {e}")
+        return {'element': article, 'text_length': 0, 'has_content': False}
+
 async def iterate_posts(page: Page, max_posts: int = 15, scroll_delay: float = 1.0):
     """
     Itera pelos posts do feed com coleta limitada e detecção de crescimento.
@@ -673,26 +726,53 @@ async def extract_post_details(post: Locator):
         "has_video": has_video
     }
 
-async def _extract_author(post: Locator):
+async def _extract_author(post: Locator) -> str:
     """
-    Extrai autor do post baseado no exemplo do Facebook fornecido.
-    Foca em links de perfil com span[dir="auto"] visíveis.
+    Extrai autor do post com validação robusta.
+    Busca por links visíveis de perfil e valida que pareça nome de pessoa.
     """
+    import re
     
-    # Padrões para excluir do autor (expandidos)
-    exclude_patterns = [
-        r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)$',
-        r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)\s*(ago|atrás)?$',
-        r'^(há|ago)\s+\d+',
-        r'^(Like|Comment|Share|Curtir|Comentar|Compartilhar|Reply|Responder)$',
-        r'^(Follow|Seguir|See More|Ver Mais|Most Relevant|Top Contributor)$',
-        r'^(Show|Mostrar|Hide|Ocultar|Edit|Editar|Delete|Deletar)$',
-        r'^·+$',
-        r'^\d+$',
-        r'^\s*$',
-        r'^(Sponsored|Patrocinado|Ad|Anúncio)$',
-        r'^(More|Mais|Less|Menos)$'
+    # Aguardar cabeçalho renderizado
+    try:
+        await post.wait_for_selector('h3, [role="article"] a[role="link"]', timeout=3000)
+    except Exception:
+        pass
+    
+    # Candidatos para links de perfil
+    profile_selectors = [
+        'a[href*="facebook.com"], a[href*="/user/"], a[href*="/profile.php"]'
     ]
+    
+    for selector in profile_selectors:
+        try:
+            candidates = post.locator(selector)
+            count = await candidates.count()
+            
+            for i in range(count):
+                link = candidates.nth(i)
+                if await link.is_visible():
+                    # Usar inner_text para melhor extração
+                    raw = (await link.inner_text() or "").strip()
+                    if not raw:
+                        continue
+                        
+                    # Pegar parte antes de '·' (separador comum)
+                    name = raw.split("·")[0].strip()
+                    
+                    # Validar que pareça nome
+                    if (len(name.split()) >= 2 and  # Pelo menos duas palavras
+                        re.search(r"[A-Za-zÀ-ÿ]", name) and  # Contém letras
+                        len(name) >= 4 and len(name) <= 100 and  # Tamanho razoável
+                        not name.isdigit() and  # Não é só números
+                        not re.search(r'^\d+\s*(min|h|d|ago|há)', name.lower()) and  # Não é timestamp
+                        not any(term in name.lower() for term in ['like', 'comment', 'share', 'curtir', 'comentar'])):  # Não é UI
+                        return name
+                        
+        except Exception:
+            continue
+    
+    return ""
     
     # Estratégia 1: Seletores específicos baseados na estrutura real do Facebook
     try:
@@ -813,127 +893,68 @@ async def _extract_author(post: Locator):
     
     return ""
 
-async def _extract_text(post: Locator):
-    """Extrai texto do post baseado na estrutura real do Facebook."""
+async def _extract_text(post: Locator) -> str:
+    """Extrai texto do post usando inner_text e filtragem melhorada."""
     
-    # Primeiro, tentar expandir texto usando múltiplas estratégias
+    # Primeiro, tentar expandir texto
     try:
-        # Estratégia 1: Buscar botões "Ver mais" mais agressivamente
         see_more_selectors = [
-            # Botões com role="button"
             'div[role="button"]:has-text("Ver mais")',
             'div[role="button"]:has-text("See more")',
-            'span[role="button"]:has-text("Ver mais")',  
-            'span[role="button"]:has-text("See more")',
-            # Botões sem role específico
-            'div:has-text("Ver mais"):not(:has(div))',
-            'span:has-text("Ver mais"):not(:has(span))',
-            'div:has-text("See more"):not(:has(div))',
-            'span:has-text("See more"):not(:has(span))',
-            # Seletores mais específicos do Facebook
-            '[data-testid="post_message"] div[role="button"]',
-            'div[data-ad-preview="message"] div[role="button"]',
-            # Qualquer elemento clicável com "Ver mais"
             '*[role="button"]:has-text("Ver mais")',
             '*[role="button"]:has-text("See more")'
         ]
         
-        expanded = False
         for selector in see_more_selectors:
             try:
                 see_more_button = post.locator(selector).first()
                 if await see_more_button.count() > 0 and await see_more_button.is_visible():
-                    button_text = await see_more_button.text_content()
-                    if button_text and ('ver mais' in button_text.lower() or 'see more' in button_text.lower()):
-                        bot_logger.debug(f"Expandindo texto: clicando em '{button_text.strip()}'")
-                        await see_more_button.click()
-                        await asyncio.sleep(2)  # Aguardar expansão
-                        expanded = True
-                        break
+                    await see_more_button.click()
+                    await asyncio.sleep(2)
+                    break
             except Exception:
                 continue
                 
-        # Estratégia 2: Usar get_by_role para "Ver mais"
-        try:
-            see_more_by_role = post.get_by_role("button", name=re.compile(r"See more|Ver mais", re.IGNORECASE))
-            if await see_more_by_role.count() > 0:
-                bot_logger.debug("Expandindo texto: get_by_role")
-                await see_more_by_role.first().click()
-                await asyncio.sleep(1.5)
-        except Exception:
-            pass
-            
     except Exception:
-        bot_logger.debug("Erro ao tentar expandir texto")
+        bot_logger.debug("Erro ao expandir texto")
     
-    # Aguardar se foi expandido
-    if expanded:
-        await asyncio.sleep(1)
-    
-    # Estratégia 1: Buscar texto principal em div[dir="auto"] não relacionados a UI
+    # Extrair texto usando inner_text em elementos principais
     try:
-        # Primeiro, buscar div[dir="auto"] que não estão dentro de botões ou links
-        text_elements = post.locator('div[dir="auto"]:visible:not([aria-hidden="true"]):not(a div):not(button div):not([role="button"] div)')
+        text_elements = post.locator('div[dir="auto"]:visible')
         all_texts = []
         
         count = await text_elements.count()
-        bot_logger.debug(f"Encontrados {count} elementos div[dir='auto'] para texto")
-        
         for i in range(count):
             elem = text_elements.nth(i)
             try:
                 if await elem.is_visible():
-                    text = (await elem.text_content() or "").strip()
-                    if text and len(text) > 3:
-                        all_texts.append(text)
-                        bot_logger.debug(f"Texto encontrado: {text[:50]}...")
+                    # Usar inner_text para melhor extração
+                    text = (await elem.inner_text() or "").strip()
+                    if text and len(text) > 10:  # Linhas com mais de 10 caracteres
+                        # Filtrar linhas de UI
+                        lines = text.split('\n')
+                        valid_lines = []
+                        
+                        for line in lines:
+                            line_clean = line.strip()
+                            if (len(line_clean) > 10 and
+                                re.search(r'[A-Za-zÀ-ÿ]', line_clean) and  # Contém letras
+                                not any(ui_term in line_clean.lower() for ui_term in [
+                                    'ver mais', 'see more', 'ver tradução', 'see translation',
+                                    'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar'
+                                ])):
+                                valid_lines.append(line_clean)
+                        
+                        if valid_lines:
+                            all_texts.extend(valid_lines)
+                            
             except Exception:
                 continue
         
-        # Filtrar textos de UI
-        ui_terms = [
-            'curtir', 'comentar', 'compartilhar', 'responder',
-            'like', 'comment', 'share', 'reply',
-            'ver mais', 'see more', 'mostrar mais',
-            'follow', 'seguir', 'unfollow', 'ago', 'há',
-            'min', 'hora', 'hours', 'minutes'
-        ]
-        
-        # Filtrar textos válidos - mais permissivo
-        filtered_texts = []
-        for text in all_texts:
-            text_clean = text.strip()
-            text_lower = text_clean.lower()
-            
-            # Filtros mais específicos
-            is_ui = (
-                len(text_clean) <= 3 or  # Muito curto
-                text_clean.isdigit() or  # Apenas números
-                re.match(r'^[·\s]+$', text_clean) or  # Apenas separadores
-                re.match(r'^\d+\s*(h|hr|min|m|d|hora|horas|ago|há)', text_lower) or  # Timestamp
-                any(ui_term == text_lower for ui_term in ui_terms) or  # UI exata
-                (len(text_clean) < 15 and any(ui_term in text_lower for ui_term in ['curtir', 'like', 'comment', 'share']))  # UI curta
-            )
-            
-            if not is_ui:
-                filtered_texts.append(text_clean)
-        
-        if filtered_texts:
-            # Juntar textos preservando quebras de linha
-            combined_text = '\n'.join(filtered_texts)
-            
-            # Limpar padrões residuais
-            see_more_patterns = [
-                r'\b(See more|Ver mais|Mostrar mais)\b',
-                r'\b(Continuar lendo|Continue reading)\b'
-            ]
-            
-            for pattern in see_more_patterns:
-                combined_text = re.sub(pattern, '', combined_text, flags=re.IGNORECASE)
-            
-            # Normalizar quebras duplas mas preservar estrutura
-            combined_text = re.sub(r'\n{3,}', '\n\n', combined_text)
-            combined_text = re.sub(r'[ \t]+', ' ', combined_text)  # Normalizar espaços
+        if all_texts:
+            # Juntar textos válidos
+            combined_text = '\n'.join(all_texts)
+            combined_text = re.sub(r'\n{3,}', '\n\n', combined_text)  # Normalizar quebras
             combined_text = combined_text.strip()
             
             if len(combined_text) >= 8:
@@ -941,37 +962,7 @@ async def _extract_text(post: Locator):
                 return combined_text
                 
     except Exception as e:
-        bot_logger.debug(f"Erro na extração de texto estratégia 1: {e}")
-    
-    # Estratégia 2: Fallback usando MESSAGE_CANDIDATES
-    try:
-        from .selectors import MESSAGE_CANDIDATES
-        
-        for selector in MESSAGE_CANDIDATES:
-            try:
-                elements = post.locator(selector)
-                count = await elements.count()
-                
-                if count > 0:
-                    text_parts = []
-                    for i in range(count):
-                        elem = elements.nth(i)
-                        text = (await elem.text_content() or "").strip()
-                        if text and len(text) >= 10:
-                            text_parts.append(text)
-                    
-                    if text_parts:
-                        combined_text = " ".join(text_parts)
-                        combined_text = re.sub(r'\s+', ' ', combined_text).strip()
-                        
-                        if len(combined_text) >= 10:
-                            return combined_text
-                            
-            except Exception:
-                continue
-                
-    except Exception as e:
-        bot_logger.debug(f"Erro na extração de texto estratégia 2: {e}")
+        bot_logger.debug(f"Erro na extração de texto: {e}")
     
     return ""
 

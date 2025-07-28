@@ -12,15 +12,16 @@ async def open_comment_box(post_element):
     try:
         page = post_element.page
 
-        # Estratégia 1: Botões "Comentar/Comment" tradicionais
+        # Estratégia 1: Botões "Comentar/Comment" com aria-label genérico
         comment_selectors = [
             'div[role="button"]:has-text("Comentar")',
             'div[role="button"]:has-text("Comment")',
             'span[role="button"]:has-text("Comentar")',
             'span[role="button"]:has-text("Comment")',
-            # Seletores mais específicos
+            '[aria-label*="omment" i]',  # Case insensitive
+            '[aria-label*="comentar" i]',
             '[data-testid="UFI2CommentAction/link"]',
-            '[aria-label*="omment"], [aria-label*="comentar"]'
+            '[data-testid*="comment"]'
         ]
 
         for selector in comment_selectors:
@@ -133,8 +134,13 @@ async def send_comment(post_element, comment_text):
         except Exception:
             pass
 
+        # Detectar captcha antes de digitar
+        if await _detect_captcha(page):
+            logging.warning("Captcha detectado - pausando comentário")
+            return False
+
         # Digitar comentário
-        logging.info(f"💬 Digitando comentário: {comment_text[:50]}...")
+        logging.info(f"Digitando comentário: {comment_text[:50]}...")
         await text_box.type(comment_text, delay=50)  # Delay para parecer mais humano
         await asyncio.sleep(1)
 
@@ -284,3 +290,25 @@ async def _check_comment_sent(page, textbox):
     except Exception:
         # Se der erro ao verificar, assumir que foi enviado
         return True
+
+async def _detect_captcha(page) -> bool:
+    """Detecta presença de captcha."""
+    try:
+        captcha_selectors = [
+            'iframe[src*="captcha"]',
+            'div[class*="captcha"]',
+            '[data-testid*="captcha"]'
+        ]
+        
+        for selector in captcha_selectors:
+            try:
+                element = page.locator(selector).first()
+                if await element.count() > 0 and await element.is_visible():
+                    return True
+            except Exception:
+                continue
+                
+        return False
+        
+    except Exception:
+        return False

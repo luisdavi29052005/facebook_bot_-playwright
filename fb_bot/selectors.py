@@ -118,3 +118,113 @@ async def expand_article_text(article: Locator):
     except Exception:
         pass  # Silencioso conforme solicitado
     return False
+"""
+Seletores CSS para elementos do Facebook.
+Centralizados para facilitar manutenção quando o Facebook muda a interface.
+"""
+
+# Seletores principais para feed e posts
+FEED = "div[role='feed']"
+ARTICLE = "div[role='article'], article[role='article']"
+
+# Seletores para diferentes tipos de posts
+POST_SELECTORS = [
+    'div[data-pagelet^="FeedUnit_"]',
+    'div[role="article"]', 
+    'article[role="article"]',
+    'div[class*="x1yztbdb"]',  # Classe comum de posts
+    'div:has(time[datetime])'   # Posts com timestamp
+]
+
+# Estratégias para extração de autor
+AUTHOR_STRATEGIES = [
+    'a[href*="facebook.com"] span[dir="auto"]:not([aria-hidden="true"])',
+    'a[href*="/user/"] span[dir="auto"]:not([aria-hidden="true"])',
+    'a[href*="/profile.php"] span[dir="auto"]:not([aria-hidden="true"])',
+    'h3 a[role="link"] span[dir="auto"]',
+    'strong a[role="link"] span[dir="auto"]'
+]
+
+# Estratégias para extração de texto
+TEXT_STRATEGIES = [
+    'div[dir="auto"]:visible:not([aria-hidden="true"])',
+    '[data-testid="post_message"] div[dir="auto"]',
+    'div[data-ad-preview="message"] div[dir="auto"]'
+]
+
+# Candidatos para mensagens (fallback)
+MESSAGE_CANDIDATES = [
+    '[data-testid="post_message"]',
+    'div[data-ad-preview="message"]',
+    'div[class*="userContent"]',
+    'div[dir="auto"]:not(button div):not(a div)'
+]
+
+# Estratégias para extração de imagens
+IMAGE_STRATEGIES = [
+    'img[src*="scontent"]',  # Imagens reais do Facebook
+    'div[style*="background-image"][style*="scontent"]',  # Background images
+    'svg image[href*="scontent"]'  # SVG images
+]
+
+# Padrões para excluir de autores
+AUTHOR_EXCLUDE_PATTERNS = [
+    r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)$',
+    r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)\s*(ago|atrás)?$',
+    r'^(há|ago)\s+\d+',
+    r'^(Like|Comment|Share|Curtir|Comentar|Compartilhar|Reply|Responder)$',
+    r'^(Follow|Seguir|See More|Ver Mais|Most Relevant|Top Contributor)$',
+    r'^·+$',
+    r'^\d+$',
+    r'^\s*$'
+]
+
+# Padrões para excluir de texto
+TEXT_EXCLUDE_PATTERNS = [
+    'ver mais', 'see more', 'mostrar mais',
+    'ver tradução', 'see translation',
+    'curtir', 'comentar', 'compartilhar',
+    'like', 'comment', 'share', 'reply'
+]
+
+# Seletores para botões "Ver mais"
+SEE_MORE_SELECTORS = [
+    'div[role="button"]:has-text("Ver mais")',
+    'div[role="button"]:has-text("See more")',
+    'span[role="button"]:has-text("Ver mais")',
+    'span[role="button"]:has-text("See more")',
+    '*[role="button"]:has-text("Ver mais")',
+    '*[role="button"]:has-text("See more")'
+]
+
+# Seletores para comentários
+COMMENT_BUTTON_SELECTORS = [
+    'div[role="button"]:has-text("Comentar")',
+    'div[role="button"]:has-text("Comment")',
+    '[aria-label*="omment" i]',
+    '[aria-label*="comentar" i]',
+    '[data-testid*="comment"]'
+]
+
+COMMENT_TEXTBOX_SELECTORS = [
+    'div[contenteditable="true"][role="textbox"]',
+    'textarea[placeholder*="omment"], textarea[placeholder*="comentar"]',
+    '[data-testid="UFI2CommentTextarea"]'
+]
+
+async def expand_article_text(article):
+    """Expande texto do artigo clicando em 'Ver mais' se disponível."""
+    try:
+        for selector in SEE_MORE_SELECTORS:
+            try:
+                see_more = article.locator(selector).first()
+                if await see_more.count() > 0 and await see_more.is_visible():
+                    await see_more.click()
+                    import asyncio
+                    await asyncio.sleep(2)
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False

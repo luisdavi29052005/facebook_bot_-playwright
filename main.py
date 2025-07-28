@@ -1,14 +1,20 @@
+
 import asyncio
 import logging
 from pathlib import Path
+from typing import Optional
+import threading
 
 from logger import setup_logging, bot_logger
 from state_manager import StateManager
 from fb_bot.config import config
 from fb_bot.login import fb_login
-from fb_bot.monitor import navigate_to_group, find_next_valid_post, extract_post_id, extract_post_details, iterate_posts
+from fb_bot.monitor import extract_post_id, extract_post_details, iterate_posts
 from fb_bot.commenter import open_comment_box, send_comment
 from fb_bot.n8n_client import ask_n8n, healthcheck_n8n
+
+# Global stop event for clean shutdown
+stop_event = threading.Event()
 
 class PostProcessor:
     """Processador de posts com logging limpo."""
@@ -18,8 +24,12 @@ class PostProcessor:
         self.posts_processed_session = 0
         self.leads_found_session = 0
 
-    async def process_post(self, post_element, page):
+    async def process_post(self, post_element, page) -> bool:
         """Processa um único post."""
+        # Check stop event
+        if stop_event.is_set():
+            return False
+            
         # Extrair ID
         post_id = await extract_post_id(post_element)
         if not post_id:
@@ -31,11 +41,10 @@ class PostProcessor:
             bot_logger.debug(f"Post {post_id} já processado")
             return False
 
-        # Extrair detalhes
-        try:
-            details = await extract_post_details(post_element)
-        except Exception as e:
-            bot_logger.error(f"Erro na extração: {e}")
+        # Extrair detalhes com retry
+        details = await self._extract_with_retry(post_element)
+        if not details:
+            self.state.add(post_id)
             return False
 
         # Validar conteúdo
@@ -50,11 +59,11 @@ class PostProcessor:
             return False
 
         # Lead encontrado!
-        bot_logger.success(f"LEAD ENCONTRADO: {details.get('author', 'N/A')}")
+        bot_logger.info(f"LEAD ENCONTRADO: {details.get('author', 'N/A')}")
         bot_logger.info(f"Texto: {details.get('text', '')[:100]}...")
 
-        # Enviar para n8n
-        reply = self._get_ai_response(details, post_id)
+        # Enviar para n8n com backoff exponencial
+        reply = await self._get_ai_response_async(details, post_id)
         if not reply:
             self.state.add(post_id)
             return False
@@ -65,11 +74,30 @@ class PostProcessor:
 
         if success:
             self.leads_found_session += 1
-            bot_logger.success(f"Comentário enviado! Total de leads: {self.leads_found_session}")
+            bot_logger.info(f"Comentário enviado! Total de leads: {self.leads_found_session}")
 
         return success
 
-    def _is_valid_post(self, details):
+    async def _extract_with_retry(self, post_element, max_retries: int = 2):
+        """Extrai detalhes com retry limitado."""
+        for attempt in range(max_retries + 1):
+            try:
+                details = await extract_post_details(post_element)
+                if details and (details.get('text') or details.get('image_url') or details.get('has_video')):
+                    return details
+                    
+                if attempt < max_retries:
+                    bot_logger.debug(f"Tentativa {attempt + 1} falhou, aguardando...")
+                    await asyncio.sleep(2)
+                    
+            except Exception as e:
+                bot_logger.error(f"Erro na extração tentativa {attempt + 1}: {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(2)
+                    
+        return None
+
+    def _is_valid_post(self, details: dict) -> bool:
         """Valida se o post tem conteúdo válido."""
         text = details.get('text', '').strip()
         image_url = details.get('image_url', '').strip()
@@ -82,7 +110,6 @@ class PostProcessor:
         # Verificar se autor não é timestamp ou elemento de UI
         author = details.get('author', '').strip()
         if author:
-            # Usar regex mais preciso para validação do autor
             import re
             invalid_patterns = [
                 r'^\d+\s*(min|h|hr|hrs|d|dia|dias|hora|horas|s|sec|seconds)$',
@@ -96,7 +123,7 @@ class PostProcessor:
 
         return True
 
-    def _matches_keywords(self, text):
+    def _matches_keywords(self, text: str) -> bool:
         """Verifica se o texto contém palavras-chave."""
         if not config.keywords:
             return True
@@ -104,8 +131,8 @@ class PostProcessor:
         text_lower = text.lower()
         return any(keyword.lower() in text_lower for keyword in config.keywords)
 
-    def _get_ai_response(self, details, post_id):
-        """Obtém resposta da IA."""
+    async def _get_ai_response_async(self, details: dict, post_id: str) -> Optional[str]:
+        """Obtém resposta da IA com backoff exponencial."""
         payload = {
             "prompt": details.get('text', 'Post sem texto - apenas imagem'),
             "author": details.get('author', 'Autor não identificado'),
@@ -114,16 +141,28 @@ class PostProcessor:
         }
 
         bot_logger.info("Enviando para IA...")
-        reply = ask_n8n(config.n8n_webhook_url, payload)
+        
+        # Retry com backoff exponencial
+        max_retries = 3
+        base_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                reply = await ask_n8n(config.n8n_webhook_url, payload)
+                if reply:
+                    bot_logger.info(f"IA respondeu: {reply[:50]}...")
+                    return reply
+                    
+            except Exception as e:
+                bot_logger.error(f"Erro na tentativa {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    await asyncio.sleep(delay)
 
-        if reply:
-            bot_logger.success(f"IA respondeu: {reply[:50]}...")
-        else:
-            bot_logger.error("IA não respondeu")
+        bot_logger.error("IA não respondeu após todas as tentativas")
+        return None
 
-        return reply
-
-    async def _send_comment(self, post_element, comment):
+    async def _send_comment(self, post_element, comment: str) -> bool:
         """Envia comentário no post."""
         try:
             if await open_comment_box(post_element):
@@ -134,9 +173,9 @@ class PostProcessor:
             return False
 
 async def main_loop():
-    """Loop principal simplificado."""
+    """Loop principal com parada limpa."""
     setup_logging()
-    bot_logger.success("Iniciando bot...")
+    bot_logger.info("Iniciando bot...")
 
     # Validar configurações
     is_valid, error_msg = config.is_valid()
@@ -145,8 +184,12 @@ async def main_loop():
         return
 
     # Verificar n8n
-    if not healthcheck_n8n(config.n8n_webhook_url):
-        bot_logger.error("n8n não está acessível")
+    try:
+        if not await healthcheck_n8n(config.n8n_webhook_url):
+            bot_logger.error("n8n não está acessível")
+            return
+    except Exception as e:
+        bot_logger.error(f"Erro ao verificar n8n: {e}")
         return
 
     # Inicializar
@@ -161,125 +204,129 @@ async def main_loop():
         return
 
     page = login_manager.get_page()
-    bot_logger.success("Login realizado com sucesso")
+    bot_logger.info("Login realizado com sucesso")
 
     # Loop principal
     consecutive_empty_cycles = 0
 
-    while True:
-        try:
-            bot_logger.info("Iniciando novo ciclo...")
-            
-            # Guard clauses: verificar se página/contexto ainda estão ativos
+    try:
+        while not stop_event.is_set():
             try:
-                if page.is_closed():
-                    raise Exception("Página foi fechada")
-                    
-                if not login_manager.context.pages:
-                    raise Exception("Contexto sem páginas")
-                    
-                # Teste simples para verificar se página responde
-                await page.evaluate("() => document.title")
+                bot_logger.info("Iniciando novo ciclo...")
                 
-            except Exception as e:
-                bot_logger.error(f"Sessão perdida: {e}")
-                bot_logger.info("Recriando sessão de login...")
-                
-                # Limpar sessão anterior com segurança
+                # Verificar se página/contexto ainda estão ativos
                 try:
-                    await login_manager.__aexit__(None, None, None)
-                except Exception:
-                    pass
-                
-                # Criar nova sessão
-                login_manager = await fb_login(headless=config.headless)
-                if not login_manager:
-                    bot_logger.error("Falha ao recriar sessão")
-                    break
-                    
-                page = login_manager.get_page()
-                bot_logger.success("Sessão recriada com sucesso")
-                
-                # Aguardar estabilização
-                await asyncio.sleep(3)
-            
-            # Navegar para grupo com retry
-            try:
-                await login_manager.navigate_to_group(config.facebook_group_url)
-            except Exception as e:
-                bot_logger.error(f"Erro ao navegar para grupo: {e}")
-                continue  # Pular este ciclo
-
-            # Processar posts
-            posts_found = 0
-            leads_found = 0
-
-            # Serializar o ciclo: não fazer goto/reload durante iteração
-            bot_logger.debug("Iniciando processamento de posts...")
-            
-            # Use iterate_posts to iterate through posts with progressive scrolling
-            async for post_element in iterate_posts(page, max_posts=15):
-                try:
-                    # Guard clause: verificar se página ainda está ativa
                     if page.is_closed():
-                        bot_logger.warning("Página fechada durante iteração - interrompendo")
-                        break
-                    
-                    posts_found += 1
-                    success = await processor.process_post(post_element, page)
-
-                    if success:
-                        leads_found += 1
-                        bot_logger.debug("Pausa após comentário bem-sucedido")
-                        await asyncio.sleep(15)  # Pausa após comentário
-                    else:
-                        await asyncio.sleep(3)   # Pausa menor
+                        raise Exception("Página foi fechada")
                         
-                    # Verificação adicional de integridade da página
-                    try:
-                        await page.evaluate("() => window.location.href")
-                    except Exception:
-                        bot_logger.warning("Página não responde - interrompendo iteração")
-                        break
-
+                    if not login_manager.context.pages:
+                        raise Exception("Contexto sem páginas")
+                        
+                    # Teste simples para verificar se página responde
+                    await page.evaluate("() => document.title")
+                    
                 except Exception as e:
-                    bot_logger.error(f"Erro processando post: {e}")
-                    # Não fazer break aqui - continuar com próximo post
+                    bot_logger.error(f"Sessão perdida: {e}")
+                    bot_logger.info("Recriando sessão de login...")
+                    
+                    # Limpar sessão anterior
+                    try:
+                        await login_manager.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    
+                    # Criar nova sessão
+                    login_manager = await fb_login(headless=config.headless)
+                    if not login_manager:
+                        bot_logger.error("Falha ao recriar sessão")
+                        break
+                        
+                    page = login_manager.get_page()
+                    bot_logger.info("Sessão recriada com sucesso")
+                    await asyncio.sleep(3)
+                
+                # Navegar para grupo
+                try:
+                    await login_manager.navigate_to_group(config.facebook_group_url)
+                except Exception as e:
+                    bot_logger.error(f"Erro ao navegar para grupo: {e}")
                     continue
 
-            # Controle de ciclos vazios
-            if posts_found == 0:
-                consecutive_empty_cycles += 1
-                bot_logger.warning(f"Ciclo vazio #{consecutive_empty_cycles}")
+                # Processar posts
+                posts_found = 0
+                leads_found = 0
 
-                if consecutive_empty_cycles >= 3:
-                    bot_logger.info("Muitos ciclos vazios - recarregando página")
-                    await page.reload()
-                    await asyncio.sleep(5)
+                bot_logger.debug("Iniciando processamento de posts...")
+                
+                # Usar max_posts_per_cycle da config
+                async for post_element in iterate_posts(page, max_posts=config.max_posts_per_cycle):
+                    if stop_event.is_set():
+                        bot_logger.info("Stop event detectado, parando processamento")
+                        break
+                        
+                    try:
+                        if page.is_closed():
+                            bot_logger.warning("Página fechada durante iteração - interrompendo")
+                            break
+                        
+                        posts_found += 1
+                        success = await processor.process_post(post_element, page)
+
+                        if success:
+                            leads_found += 1
+                            bot_logger.debug("Pausa após comentário bem-sucedido")
+                            await asyncio.sleep(15)
+                        else:
+                            await asyncio.sleep(3)
+                            
+                        # Verificação adicional de integridade da página
+                        try:
+                            await page.evaluate("() => window.location.href")
+                        except Exception:
+                            bot_logger.warning("Página não responde - interrompendo iteração")
+                            break
+
+                    except Exception as e:
+                        bot_logger.error(f"Erro processando post: {e}")
+                        continue
+
+                # Controle de ciclos vazios
+                if posts_found == 0:
+                    consecutive_empty_cycles += 1
+                    bot_logger.warning(f"Ciclo vazio #{consecutive_empty_cycles}")
+
+                    if consecutive_empty_cycles >= 3:
+                        bot_logger.info("Muitos ciclos vazios - recarregando página")
+                        await page.reload()
+                        await asyncio.sleep(5)
+                        consecutive_empty_cycles = 0
+                else:
                     consecutive_empty_cycles = 0
-            else:
-                consecutive_empty_cycles = 0
 
-            # Resumo do ciclo
-            bot_logger.info(f"Ciclo concluído: {posts_found} posts, {leads_found} leads")
+                # Resumo do ciclo
+                bot_logger.info(f"Ciclo concluído: {posts_found} posts, {leads_found} leads")
 
-            # Aguardar próximo ciclo
-            bot_logger.info(f"Aguardando {config.loop_interval_seconds}s...")
-            await asyncio.sleep(config.loop_interval_seconds)
+                # Aguardar próximo ciclo
+                if not stop_event.is_set():
+                    bot_logger.info(f"Aguardando {config.loop_interval_seconds}s...")
+                    await asyncio.sleep(config.loop_interval_seconds)
 
-        except KeyboardInterrupt:
-            bot_logger.info("Bot interrompido pelo usuário")
-            break
+            except asyncio.CancelledError:
+                bot_logger.info("Loop cancelado")
+                break
+            except Exception as e:
+                bot_logger.error(f"Erro no loop principal: {e}")
+                if not stop_event.is_set():
+                    await asyncio.sleep(30)
+
+    finally:
+        # Cleanup
+        try:
+            state.force_save()
+            await login_manager.__aexit__(None, None, None)
+            bot_logger.info("Bot encerrado")
         except Exception as e:
-            bot_logger.error(f"Erro no loop principal: {e}")
-            await asyncio.sleep(30)
-
-    # Cleanup
-    try:
-        await login_manager.__aexit__(None, None, None)
-        bot_logger.info("Bot encerrado")
-    except Exception as e:
-        bot_logger.error(f"Erro no encerramento: {e}")
+            bot_logger.error(f"Erro no encerramento: {e}")
 
 def main():
     """Entrada principal."""
