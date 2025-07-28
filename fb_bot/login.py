@@ -1,6 +1,4 @@
 
-# fb_bot/login.py
-
 import json
 import asyncio
 from pathlib import Path
@@ -9,8 +7,9 @@ import logging
 
 # Diretório para sessão persistente
 SESSION_DIR = "./sessions/facebook_profile"
-FB_URL = "https://www.facebook.com/"
+FB_URL = "https://web.facebook.com/?_rdc=1&_rdr"
 COOKIES_FILE = "./cookies.json"
+STORAGE_STATE_FILE = "./sessions/storage_state.json"
 
 class PlaywrightFBLogin:
     def __init__(self, headless: bool = False):
@@ -18,6 +17,7 @@ class PlaywrightFBLogin:
         self.browser: Browser = None
         self.context: BrowserContext = None
         self.page: Page = None
+        self.playwright = None
 
     async def __aenter__(self):
         self.playwright = await async_playwright().start()
@@ -28,27 +28,42 @@ class PlaywrightFBLogin:
         
         logging.info(f"📁 Usando diretório de sessão persistente: {SESSION_DIR}")
         
-        # Usar launch_persistent_context para manter sessão
-        self.context = await self.playwright.chromium.launch_persistent_context(
-            user_data_dir=SESSION_DIR,
-            headless=self.headless,
-            viewport={'width': 1528, 'height': 738},
-            locale='pt-BR',
-            timezone_id='America/Sao_Paulo',
-             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0',
-            args=[
-                '--start-maximized',
+        # Configuração robusta do contexto
+        context_options = {
+            'user_data_dir': SESSION_DIR,
+            'headless': self.headless,
+            'viewport': {'width': 1366, 'height': 768},
+            'locale': 'pt-BR',
+            'timezone_id': 'America/Sao_Paulo',
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'extra_http_headers': {
+                'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br'
+            },
+            'args': [
                 '--disable-notifications',
                 '--disable-infobars',
                 '--disable-extensions',
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
-                '--lang=pt-BR,pt',
                 '--disable-blink-features=AutomationControlled',
                 '--disable-web-security',
-                '--allow-running-insecure-content'
+                '--allow-running-insecure-content',
+                '--disable-features=VizDisplayCompositor'
             ]
-        )
+        }
+        
+        # Tentar carregar storage state se existir
+        storage_state_path = Path(STORAGE_STATE_FILE)
+        if storage_state_path.exists():
+            try:
+                context_options['storage_state'] = str(storage_state_path)
+                logging.info("🗂️ Carregando storage state salvo")
+            except Exception as e:
+                logging.warning(f"⚠️ Erro ao carregar storage state: {e}")
+        
+        self.context = await self.playwright.chromium.launch_persistent_context(**context_options)
         
         # Aguardar contexto carregar
         await asyncio.sleep(2)
@@ -62,234 +77,345 @@ class PlaywrightFBLogin:
             self.page = await self.context.new_page()
             logging.info("📄 Criando nova página no contexto persistente")
         
-        # Primeiro tentar login com cookies se existirem
-        if await self._try_cookie_login():
-            logging.info("🍪 Login automático com cookies bem-sucedido!")
-            return self
+        # Configurar interceptadores de requisição para melhor performance
+        await self.page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", lambda route: route.abort())
         
-        # Verificar se já está logado na sessão persistente
-        if await self._check_login_status():
-            logging.info("✅ Login automático via sessão persistente bem-sucedido!")
-            logging.info("🎉 Sessão do Facebook mantida com sucesso!")
-            return self
-        
-        # Se não estiver logado, fazer login manual
-        logging.info("🔐 Primeira execução ou sessão expirada - fazendo login manual...")
-        if await self._perform_manual_login():
-            logging.info("✅ Login manual concluído e sessão salva permanentemente!")
-            logging.info("🔄 Próximas execuções usarão esta sessão automaticamente")
+        # Garantir login válido
+        if await self.ensure_logged_in():
             return self
         else:
-            raise Exception("❌ Falha no login manual")
+            raise Exception("❌ Falha no processo de login")
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # Com persistent context, não fechamos o contexto para manter a sessão
-        # Apenas fechamos o playwright
-        if hasattr(self, 'playwright'):
+        if hasattr(self, 'playwright') and self.playwright:
             try:
+                # Salvar storage state antes de fechar
+                if self.context:
+                    await self._save_storage_state()
                 await self.playwright.stop()
-                logging.info("✅ Playwright encerrado - sessão mantida no disco")
+                logging.info("✅ Playwright encerrado - sessão mantida")
             except Exception as e:
                 logging.error(f"⚠️ Erro ao fechar Playwright: {e}")
 
+    async def ensure_logged_in(self):
+        """Garante que o usuário está logado com múltiplas estratégias."""
+        try:
+            logging.info("🔍 Verificando status de login...")
+            
+            # Navegar para Facebook com retry
+            if not await self._navigate_to_facebook():
+                return False
+            
+            # Verificar se já está logado
+            if await self._check_login_status():
+                logging.info("✅ Já logado via sessão persistente")
+                await self._save_storage_state()
+                return True
+            
+            # Tentar login com cookies se disponíveis
+            if await self._try_cookie_login():
+                logging.info("✅ Login com cookies bem-sucedido")
+                await self._save_storage_state()
+                return True
+            
+            # Fallback para login manual
+            logging.info("🔐 Necessário login manual...")
+            if await self._perform_manual_login():
+                logging.info("✅ Login manual concluído")
+                await self._save_storage_state()
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logging.error(f"❌ Erro no processo de login: {e}")
+            return False
+
+    async def _navigate_to_facebook(self, retries=3):
+        """Navega para Facebook com retry."""
+        for attempt in range(retries):
+            try:
+                logging.info(f"🌐 Navegando para Facebook (tentativa {attempt + 1}/{retries})")
+                
+                response = await self.page.goto(
+                    FB_URL, 
+                    wait_until='domcontentloaded',
+                    timeout=30000
+                )
+                
+                if response and response.status < 400:
+                    await asyncio.sleep(3)  # Aguardar carregamento adicional
+                    return True
+                    
+            except Exception as e:
+                logging.warning(f"⚠️ Tentativa {attempt + 1} falhou: {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                    
+        logging.error("❌ Falha ao navegar para Facebook após múltiplas tentativas")
+        return False
+
+    async def _check_login_status(self):
+        """Verifica se está logado com múltiplos indicadores."""
+        try:
+            # Múltiplas verificações de login
+            login_checks = [
+                # Verificar ausência de formulário de login
+                ("input[name='email']", False, "Formulário de login ausente"),
+                # Verificar presença de navegação
+                ("div[role='navigation']", True, "Navegação principal presente"),
+                # Verificar feed ou home
+                ("div[role='feed'], a[aria-label*='Home'], a[aria-label*='Início']", True, "Feed ou link Home presente"),
+                # Verificar perfil/menu
+                ("div[data-testid='left_nav_menu_list']", True, "Menu lateral presente")
+            ]
+            
+            for selector, should_exist, description in login_checks:
+                try:
+                    element = await self.page.wait_for_selector(selector, timeout=5000)
+                    exists = element is not None
+                    
+                    if (should_exist and exists) or (not should_exist and not exists):
+                        logging.info(f"✅ Login verificado: {description}")
+                        return True
+                        
+                except Exception:
+                    continue
+            
+            # Verificação adicional por URL
+            current_url = self.page.url
+            if ('facebook.com' in current_url and 
+                not any(pattern in current_url for pattern in ['login', 'recover', 'checkpoint', 'help'])):
+                logging.info("✅ Login verificado via URL")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Erro na verificação de login: {e}")
+            return False
+
+    async def _try_cookie_login(self):
+        """Tenta login com cookies salvos."""
+        try:
+            cookies = self._load_cookies()
+            if not cookies:
+                return False
+                
+            logging.info("🍪 Tentando login automático com cookies...")
+            
+            # Aplicar cookies
+            await self.context.add_cookies(cookies)
+            
+            # Recarregar página para ativar cookies
+            await self.page.reload(wait_until='domcontentloaded', timeout=30000)
+            await asyncio.sleep(5)
+            
+            # Verificar se funcionou
+            return await self._check_login_status()
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Erro no login com cookies: {e}")
+            return False
+
     def _load_cookies(self):
-        """Carrega cookies do arquivo cookies.json"""
+        """Carrega cookies do arquivo."""
         try:
             if not Path(COOKIES_FILE).exists():
-                logging.warning(f"📄 Arquivo de cookies não encontrado: {COOKIES_FILE}")
                 return None
                 
             with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
                 cookies_data = json.load(f)
                 
-            # Verificar se é o formato correto (com 'all' ou 'essential')
+            # Normalizar formato de cookies
             if isinstance(cookies_data, dict):
-                if 'all' in cookies_data:
-                    cookies = cookies_data['all']
-                elif 'essential' in cookies_data:
-                    cookies = cookies_data['essential']
-                else:
-                    cookies = cookies_data
+                cookies = cookies_data.get('all') or cookies_data.get('essential') or cookies_data
             elif isinstance(cookies_data, list):
                 cookies = cookies_data
             else:
-                logging.error("❌ Formato de cookies inválido")
                 return None
                 
-            logging.info(f"🍪 Carregados {len(cookies)} cookies do arquivo")
+            logging.info(f"🍪 Carregados {len(cookies)} cookies")
             return cookies
             
         except Exception as e:
             logging.error(f"❌ Erro ao carregar cookies: {e}")
             return None
 
-    async def _try_cookie_login(self):
-        """Tenta fazer login usando cookies salvos"""
-        try:
-            cookies = self._load_cookies()
-            if not cookies:
-                logging.info("🍪 Nenhum cookie disponível para login automático")
-                return False
-                
-            logging.info("🍪 Tentando login automático com cookies...")
-            
-            # Ir para o Facebook primeiro
-            await self.page.goto(FB_URL, wait_until='domcontentloaded')
-            await asyncio.sleep(2)
-            
-            # Aplicar cookies
-            await self.context.add_cookies(cookies)
-            logging.info("🍪 Cookies aplicados com sucesso")
-            
-            # Navegar novamente para ativar os cookies
-            await self.page.goto(FB_URL, wait_until='domcontentloaded')
-            await asyncio.sleep(5)  # Aguardar carregamento completo
-            
-            # Verificar se o login foi bem-sucedido
-            if await self._check_login_status():
-                logging.info("✅ Login com cookies realizado com sucesso!")
-                return True
-            else:
-                logging.warning("⚠️ Cookies não resultaram em login válido")
-                return False
-                
-        except Exception as e:
-            logging.error(f"❌ Erro no login com cookies: {e}")
-            return False
-
-    async def _check_login_status(self):
-        """Verifica se o usuário está logado usando sessão persistente"""
-        try:
-            logging.info("🔍 Verificando status de login...")
-            
-            # Múltiplas verificações para confirmar login
-            login_indicators = [
-                "a[aria-label='Home'], a[aria-label='Início']",
-                "div[role='banner'] a[href*='facebook.com']",
-                "a[href*='facebook.com'][aria-label*='Home']",
-                "div[data-pagelet='NavigationUnit']",
-                "[data-testid='nav_search_button']",
-                "div[role='navigation']",
-                "[data-testid='left_nav_menu_list']"
-            ]
-            
-            for indicator in login_indicators:
-                try:
-                    element = await self.page.wait_for_selector(indicator, timeout=8000)
-                    if element:
-                        logging.info(f"✅ Login verificado via elemento: {indicator}")
-                        current_url = self.page.url
-                        logging.info(f"📍 URL atual: {current_url}")
-                        return True
-                except:
-                    continue
-            
-            # Verificação por URL (não deve estar em páginas de login)
-            current_url = self.page.url
-            logging.info(f"📍 URL atual para verificação: {current_url}")
-            
-            if 'facebook.com' in current_url and not any(page in current_url for page in ['login', 'recover', 'checkpoint']):
-                logging.info("✅ Login verificado via URL (não está em página de login)")
-                return True
-                
-            logging.warning("❌ Não foi possível verificar login - redirecionamento para login detectado")
-            return False
-            
-        except Exception as e:
-            logging.error(f"⚠️ Erro na verificação de login: {e}")
-            return False
-
     async def _perform_manual_login(self):
-        """Realiza login manual aguardando interação do usuário"""
+        """Realiza login manual com tratamento de consentimentos."""
         try:
-            await self.page.goto(FB_URL)
-            logging.warning("🔐 ATENÇÃO: Sessão expirada ou primeira execução!")
-            logging.info("👆 Por favor, faça login manualmente no navegador que foi aberto.")
-            logging.info("📱 Use suas credenciais normais do Facebook")
-            logging.info("⏳ Aguardando login... (timeout: 20 minutos)")
-            logging.info("💡 DICA: Após o login, sua sessão será salva permanentemente!")
+            # Ir para página de login se necessário
+            if 'login' not in self.page.url:
+                await self.page.goto("https://web.facebook.com/login", wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(3)
             
-            # Aguardar até 20 minutos pelo login (mais tempo para usuário)
-            for i in range(1200):  # 1200 segundos = 20 minutos
-                # Log de progresso a cada minuto
+            logging.warning("🔐 ATENÇÃO: Login manual necessário!")
+            logging.info("👆 Faça login no navegador aberto")
+            logging.info("📱 Use suas credenciais normais")
+            logging.info("⏳ Aguardando login... (timeout: 15 minutos)")
+            
+            # Aguardar login com verificação periódica
+            for i in range(900):  # 15 minutos
                 if i % 60 == 0 and i > 0:
-                    minutes_passed = i // 60
-                    logging.info(f"⏳ {minutes_passed} minuto(s) aguardando... (máximo 20 min)")
+                    minutes = i // 60
+                    logging.info(f"⏳ {minutes} minuto(s) aguardando...")
                 
-                if await self._quick_login_check():
-                    logging.info("✅ Login manual detectado com sucesso!")
-                    logging.info("💾 Salvando sessão permanentemente...")
+                # Verificar login
+                if await self._check_login_status():
+                    logging.info("✅ Login manual detectado!")
                     
-                    # Aguardar estabilização da sessão com espera inteligente
-                    try:
-                        await self.page.wait_for_load_state('networkidle', timeout=10000)
-                    except Exception:
-                        await asyncio.sleep(3)  # Fallback mínimo
-                        
-                    logging.info("🎉 Sessão salva! Próximas execuções serão automáticas!")
+                    # Tratar consentimentos/popups
+                    await self._handle_consent_popups()
+                    
                     return True
+                
+                # Verificar se precisa tratar checkpoint/2FA
+                if await self._check_checkpoint():
+                    logging.error("❌ Checkpoint/2FA detectado - resolva manualmente")
+                    continue
                     
                 await asyncio.sleep(1)
             
-            logging.error("❌ Timeout no login manual (20 minutos)")
+            logging.error("❌ Timeout no login manual")
             return False
             
         except Exception as e:
             logging.error(f"❌ Erro no login manual: {e}")
             return False
 
-    async def _quick_login_check(self):
-        """Verificação rápida de login durante processo manual"""
+    async def _handle_consent_popups(self):
+        """Trata popups de consentimento após login."""
         try:
-            # Verificações mais rápidas para o processo de login
-            quick_indicators = [
-                "a[aria-label='Home']",
-                "a[aria-label='Início']", 
-                "[data-testid='nav_search_button']"
+            popups_to_handle = [
+                # Cookies/consent banners
+                ("button:has-text('Accept All')", "Accept All"),
+                ("button:has-text('Aceitar todos')", "Aceitar todos"),
+                ("button:has-text('Allow all cookies')", "Allow all cookies"),
+                
+                # Save browser/device
+                ("button:has-text('Save Browser')", "Save Browser"),
+                ("button:has-text('Salvar navegador')", "Salvar navegador"),
+                ("button:has-text('Not now')", "Not now"),
+                ("button:has-text('Agora não')", "Agora não"),
+                
+                # Notifications
+                ("button:has-text('Turn on')", "Turn on notifications"),
+                ("button:has-text('Ativar')", "Ativar notificações"),
+                ("button:has-text('No thanks')", "No thanks"),
+                ("button:has-text('Não, obrigado')", "Não, obrigado"),
+                
+                # Generic dismiss
+                ("button[aria-label='Close'], button[aria-label='Fechar']", "Close/Fechar")
             ]
             
-            for indicator in quick_indicators:
+            for selector, description in popups_to_handle:
                 try:
-                    element = await self.page.wait_for_selector(indicator, timeout=2000)
-                    if element:
-                        return True
-                except:
+                    element = await self.page.wait_for_selector(selector, timeout=3000)
+                    if element and await element.is_visible():
+                        logging.info(f"🔄 Tratando popup: {description}")
+                        await element.click()
+                        await asyncio.sleep(2)
+                except Exception:
                     continue
                     
-            # Verificação de URL rápida
-            current_url = self.page.url
-            if ('facebook.com' in current_url and 
-                not any(page in current_url for page in ['login', 'recover', 'checkpoint'])):
-                return True
-                
+        except Exception as e:
+            logging.debug(f"Erro ao tratar popups: {e}")
+
+    async def _check_checkpoint(self):
+        """Verifica se está em checkpoint/2FA."""
+        try:
+            checkpoint_indicators = [
+                "checkpoint",
+                "two-factor",
+                "security check",
+                "verificação de segurança"
+            ]
+            
+            current_url = self.page.url.lower()
+            page_text = (await self.page.text_content('body')).lower() if await self.page.locator('body').count() > 0 else ""
+            
+            return any(indicator in current_url or indicator in page_text for indicator in checkpoint_indicators)
+            
+        except Exception:
             return False
-        except:
-            return False
+
+    async def _save_storage_state(self):
+        """Salva storage state para reutilização."""
+        try:
+            storage_state_path = Path(STORAGE_STATE_FILE)
+            storage_state_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            await self.context.storage_state(path=str(storage_state_path))
+            logging.info("💾 Storage state salvo")
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Erro ao salvar storage state: {e}")
 
     async def navigate_to_group(self, group_url: str):
-        """Navega para um grupo específico"""
-        logging.info(f"🌍 Navegando para o grupo: {group_url}")
-        await self.page.goto(group_url, wait_until='domcontentloaded')
-        
-        # Aguardar feed carregar
+        """Navega para grupo com retry e verificação de sessão."""
         try:
-            await self.page.wait_for_selector("div[role='feed']", timeout=25000)
-            await asyncio.sleep(2)
-            logging.info("✅ Grupo carregado com sucesso")
+            # Verificar se ainda está logado antes de navegar
+            if not await self._check_login_status():
+                logging.warning("⚠️ Sessão perdida, re-estabelecendo login...")
+                if not await self.ensure_logged_in():
+                    raise Exception("Falha ao re-estabelecer login")
+            
+            logging.info(f"🌍 Navegando para grupo: {group_url}")
+            
+            # Navegar com retry
+            for attempt in range(3):
+                try:
+                    response = await self.page.goto(
+                        group_url, 
+                        wait_until='domcontentloaded',
+                        timeout=30000
+                    )
+                    
+                    if response and response.status < 400:
+                        break
+                        
+                except Exception as e:
+                    logging.warning(f"⚠️ Tentativa {attempt + 1} falhou: {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(5)
+                        continue
+                    else:
+                        raise
+            
+            # Aguardar feed carregar com timeout aumentado
+            try:
+                await self.page.wait_for_selector("div[role='feed']", timeout=30000)
+                await asyncio.sleep(3)
+                logging.info("✅ Grupo carregado com sucesso")
+            except Exception as e:
+                logging.warning(f"⚠️ Feed demorou para carregar: {e}")
+                # Tentar aguardar outros indicadores de carregamento
+                try:
+                    await self.page.wait_for_selector("article[role='article'], div[data-pagelet^='FeedUnit_']", timeout=15000)
+                    logging.info("✅ Conteúdo do grupo detectado")
+                except Exception:
+                    logging.error("❌ Timeout no carregamento do grupo")
+                    
         except Exception as e:
-            logging.warning(f"⚠️ Erro ao carregar grupo: {e}")
+            logging.error(f"❌ Erro ao navegar para grupo: {e}")
+            raise
 
     def get_page(self) -> Page:
-        """Retorna a página atual para uso em outras funções"""
+        """Retorna a página atual."""
         return self.page
 
 async def fb_login(headless: bool = False):
-    """Função principal de login que retorna uma instância configurada"""
+    """Função principal de login robusta."""
     login_manager = PlaywrightFBLogin(headless=headless)
     try:
         await login_manager.__aenter__()
         return login_manager
     except Exception as e:
         logging.error(f"❌ Falha crítica no login: {e}")
-        await login_manager.__aexit__(None, None, None)
+        try:
+            await login_manager.__aexit__(None, None, None)
+        except Exception:
+            pass
         return None

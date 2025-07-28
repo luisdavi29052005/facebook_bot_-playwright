@@ -73,15 +73,24 @@ class PostProcessor:
         """Valida se o post tem conteúdo válido."""
         text = details.get('text', '').strip()
         image_url = details.get('image_url', '').strip()
+        has_video = details.get('has_video', False)
 
-        if not text and not image_url:
+        # Post deve ter texto, imagem ou vídeo
+        if not text and not image_url and not has_video:
             return False
 
         # Verificar se autor não é timestamp ou elemento de UI
         author = details.get('author', '').strip()
         if author:
-            invalid_patterns = ['min', 'h', 'd', 'ago', 'há', 'like', 'comment', 'share']
-            if any(pattern in author.lower() for pattern in invalid_patterns):
+            # Usar regex mais preciso para validação do autor
+            import re
+            invalid_patterns = [
+                r'^\d+\s*(min|h|hr|hrs|d|dia|dias|hora|horas|s|sec|seconds)$',
+                r'^\d+\s*(min|h|hr|hrs|d|dia|dias|hora|horas|s|sec|seconds)\s*(ago|atrás)?$',
+                r'^(há|ago)\s+\d+',
+                r'^(like|comment|share|curtir|comentar|compartilhar)$'
+            ]
+            if any(re.search(pattern, author.lower()) for pattern in invalid_patterns):
                 bot_logger.warning(f"Autor inválido detectado: {author}")
                 return False
 
@@ -160,26 +169,82 @@ async def main_loop():
     while True:
         try:
             bot_logger.info("Iniciando novo ciclo...")
-            await login_manager.navigate_to_group(config.facebook_group_url)
+            
+            # Guard clauses: verificar se página/contexto ainda estão ativos
+            try:
+                if page.is_closed():
+                    raise Exception("Página foi fechada")
+                    
+                if not login_manager.context.pages:
+                    raise Exception("Contexto sem páginas")
+                    
+                # Teste simples para verificar se página responde
+                await page.evaluate("() => document.title")
+                
+            except Exception as e:
+                bot_logger.error(f"Sessão perdida: {e}")
+                bot_logger.info("Recriando sessão de login...")
+                
+                # Limpar sessão anterior com segurança
+                try:
+                    await login_manager.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                
+                # Criar nova sessão
+                login_manager = await fb_login(headless=config.headless)
+                if not login_manager:
+                    bot_logger.error("Falha ao recriar sessão")
+                    break
+                    
+                page = login_manager.get_page()
+                bot_logger.success("Sessão recriada com sucesso")
+                
+                # Aguardar estabilização
+                await asyncio.sleep(3)
+            
+            # Navegar para grupo com retry
+            try:
+                await login_manager.navigate_to_group(config.facebook_group_url)
+            except Exception as e:
+                bot_logger.error(f"Erro ao navegar para grupo: {e}")
+                continue  # Pular este ciclo
 
             # Processar posts
             posts_found = 0
             leads_found = 0
 
+            # Serializar o ciclo: não fazer goto/reload durante iteração
+            bot_logger.debug("Iniciando processamento de posts...")
+            
             # Use iterate_posts to iterate through posts with progressive scrolling
             async for post_element in iterate_posts(page, max_posts=15):
                 try:
+                    # Guard clause: verificar se página ainda está ativa
+                    if page.is_closed():
+                        bot_logger.warning("Página fechada durante iteração - interrompendo")
+                        break
+                    
                     posts_found += 1
                     success = await processor.process_post(post_element, page)
 
                     if success:
                         leads_found += 1
+                        bot_logger.debug("Pausa após comentário bem-sucedido")
                         await asyncio.sleep(15)  # Pausa após comentário
                     else:
                         await asyncio.sleep(3)   # Pausa menor
+                        
+                    # Verificação adicional de integridade da página
+                    try:
+                        await page.evaluate("() => window.location.href")
+                    except Exception:
+                        bot_logger.warning("Página não responde - interrompendo iteração")
+                        break
 
                 except Exception as e:
                     bot_logger.error(f"Erro processando post: {e}")
+                    # Não fazer break aqui - continuar com próximo post
                     continue
 
             # Controle de ciclos vazios
