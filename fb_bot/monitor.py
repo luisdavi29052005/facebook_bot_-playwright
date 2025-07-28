@@ -83,47 +83,78 @@ async def navigate_to_group(page: Page, group_url: str):
             bot_logger.info(f"Tentativa {attempt + 1}/3 de navegação")
             
             # Navegar com wait_until domcontentloaded
-            response = await page.goto(group_url, wait_until='domcontentloaded', timeout=30000)
+            response = await page.goto(group_url, wait_until='domcontentloaded', timeout=45000)
             
             if response and response.status >= 400:
                 raise Exception(f"Status HTTP {response.status}")
             
-            # Aguardar rede ficar ociosa
+            bot_logger.debug(f"Navegação bem-sucedida (status: {response.status if response else 'N/A'})")
+            
+            # Aguardar rede ficar ociosa com timeout maior
             try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
+                await page.wait_for_load_state("networkidle", timeout=15000)
+                bot_logger.debug("NetworkIdle atingido")
             except Exception:
                 bot_logger.debug("Timeout networkidle - continuando")
             
-            # Aguardar feed aparecer (attached, não visible)
-            try:
-                await page.wait_for_selector(FEED, state="attached", timeout=15000)
-                bot_logger.debug(f"Feed detectado na tentativa {attempt + 1}")
-                
-                # Rolar uma vez para ativar o carregamento
+            # Aguardar múltiplos indicadores de carregamento
+            feed_indicators = [
+                "div[role='feed']",
+                "div[role='main']", 
+                "div[data-pagelet='GroupFeed']",
+                "article[role='article']",
+                "div[data-pagelet^='FeedUnit_']"
+            ]
+            
+            feed_found = False
+            for indicator in feed_indicators:
+                try:
+                    await page.wait_for_selector(indicator, state="attached", timeout=8000)
+                    bot_logger.debug(f"Indicador encontrado: {indicator}")
+                    feed_found = True
+                    break
+                except Exception:
+                    continue
+            
+            if not feed_found:
+                bot_logger.warning(f"Nenhum indicador de feed encontrado na tentativa {attempt + 1}")
+                # Ainda assim, tentar rolar para ativar carregamento
                 await page.mouse.wheel(0, 800)
-                await asyncio.sleep(1)
+                await asyncio.sleep(3)
                 
-                # Aguardar conteúdo sair do skeleton
+                # Verificar novamente
+                for indicator in feed_indicators:
+                    try:
+                        await page.wait_for_selector(indicator, state="attached", timeout=5000)
+                        bot_logger.debug(f"Indicador encontrado após scroll: {indicator}")
+                        feed_found = True
+                        break
+                    except Exception:
+                        continue
+            
+            if feed_found or attempt == 2:  # Aceitar na última tentativa mesmo sem feed
+                # Rolar para ativar o carregamento de posts
+                await page.mouse.wheel(0, 1000)
                 await asyncio.sleep(2)
                 
-                bot_logger.success("Feed do grupo carregado")
-                return
+                # Aguardar conteúdo adicional carregar
+                await asyncio.sleep(3)
                 
-            except Exception as e:
-                bot_logger.warning(f"Feed não carregou na tentativa {attempt + 1}: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(3)
-                    continue
-                else:
-                    raise
-            
+                bot_logger.success("Navegação para grupo concluída")
+                return
+            else:
+                raise Exception("Feed não carregou após scroll")
+                
         except Exception as e:
             bot_logger.warning(f"Erro na tentativa {attempt + 1}: {e}")
             if attempt < 2:
-                await asyncio.sleep(5)
+                await asyncio.sleep(8)
                 continue
             else:
-                raise Exception(f"Falha após 3 tentativas: {e}")
+                bot_logger.error(f"Falha após 3 tentativas: {e}")
+                # Na última tentativa, aceitar mesmo com erro
+                bot_logger.warning("Aceitando navegação com falha - tentando continuar")
+                return
 
 async def wait_post_ready(post: Locator):
     """
@@ -221,18 +252,50 @@ async def iterate_posts(page: Page, max_posts: int = 15, scroll_delay: float = 1
         bot_logger.warning("Página fechada - cancelando iteração")
         return
     
-    # Garantir que o feed esteja presente
+    # Debug: verificar URL atual
+    current_url = page.url
+    bot_logger.debug(f"URL atual: {current_url}")
+    
+    # Aguardar página carregar completamente
     try:
-        await page.wait_for_selector(FEED, state="attached", timeout=10000)
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        bot_logger.debug("Página carregada (networkidle)")
     except Exception:
-        bot_logger.warning("Feed não encontrado - cancelando iteração")
-        return
+        bot_logger.debug("Timeout networkidle - continuando")
+    
+    # Aguardar conteúdo carregar com múltiplos seletores
+    feed_found = False
+    feed_selectors = [
+        "div[role='feed']",
+        "div[role='main']",
+        "div[data-pagelet='GroupFeed']",
+        "div[id*='feed']",
+        "div[class*='feed']"
+    ]
+    
+    for selector in feed_selectors:
+        try:
+            await page.wait_for_selector(selector, state="attached", timeout=5000)
+            bot_logger.debug(f"Feed encontrado com seletor: {selector}")
+            feed_found = True
+            break
+        except Exception:
+            continue
+    
+    if not feed_found:
+        bot_logger.warning("Nenhum feed encontrado - tentando seletores alternativos")
+        # Rolar uma vez para ativar carregamento
+        await page.mouse.wheel(0, 800)
+        await asyncio.sleep(3)
+    
+    # Aguardar posts aparecerem com seletores múltiplos
+    await asyncio.sleep(3)
     
     # Primeiro, coletar artigos até um mínimo (5-10) com detecção de crescimento
     target_articles = min(max_posts, 10)  # Alvo inicial
     collected_articles = []
     scroll_attempts = 0
-    max_scroll_attempts = 8
+    max_scroll_attempts = 15  # Aumentar tentativas
     last_count = 0
     no_growth_cycles = 0
     
@@ -240,20 +303,64 @@ async def iterate_posts(page: Page, max_posts: int = 15, scroll_delay: float = 1
     
     while len(collected_articles) < target_articles and scroll_attempts < max_scroll_attempts:
         try:
-            # Buscar artigos no feed
-            feed_locator = page.locator(FEED)
-            articles = feed_locator.locator('article[role="article"], div[data-pagelet^="FeedUnit_"]')
-            current_count = await articles.count()
+            # Buscar artigos com múltiplos seletores mais robustos
+            article_selectors = [
+                # Seletores principais do Facebook
+                'div[data-pagelet^="FeedUnit_"]',
+                'div[role="article"]',
+                'article[role="article"]',
+                # Seletores de post individuais
+                'div[class*="x1yztbdb"]',  # Classe comum de posts
+                'div[class*="x1lliihq"]',  # Container de post
+                # Seletores por estrutura
+                'div:has(> div > div > div > div > span:has-text("min")) >> xpath=ancestor::div[3]',
+                'div:has(time) >> xpath=ancestor::div[contains(@class, "x1yztbdb")]',
+                # Fallback para qualquer div com timestamp
+                'div:has([data-tooltip-content*="ago"],[data-tooltip-content*="há"])',
+                'div:has(time[datetime])',
+                # Seletores específicos para grupos
+                'div[data-testid*="story"]',
+                'div[class*="userContent"]',
+                'div[class*="story_body_container"]',
+                '[data-ad-preview="message"] >> xpath=ancestor::div[2]'
+            ]
             
-            bot_logger.debug(f"Artigos no DOM: {current_count}, coletados: {len(collected_articles)}")
+            all_articles = []
+            articles_found_with_selector = ""
+            
+            for selector in article_selectors:
+                try:
+                    articles = page.locator(selector)
+                    count = await articles.count()
+                    bot_logger.debug(f"Seletor '{selector}': {count} elementos")
+                    
+                    if count > 0:
+                        for i in range(count):
+                            article = articles.nth(i)
+                            if await article.is_visible():
+                                all_articles.append(article)
+                        
+                        if count > len(all_articles) // 2:  # Se este seletor trouxe mais resultados
+                            articles_found_with_selector = selector
+                        
+                except Exception as e:
+                    bot_logger.debug(f"Erro com seletor {selector}: {e}")
+                    continue
+            
+            current_count = len(all_articles)
+            bot_logger.debug(f"Total de artigos encontrados: {current_count} (melhor seletor: {articles_found_with_selector})")
             
             # Processar novos artigos encontrados
             for i in range(len(collected_articles), min(current_count, target_articles)):
                 try:
-                    article = articles.nth(i)
+                    if i >= len(all_articles):
+                        break
+                        
+                    article = all_articles[i]
                     
                     # Verificar se elemento é válido e visível
                     if not await article.is_visible():
+                        bot_logger.debug(f"Artigo {i} não visível")
                         continue
                     
                     # Aguardar post sair do skeleton
@@ -262,6 +369,7 @@ async def iterate_posts(page: Page, max_posts: int = 15, scroll_delay: float = 1
                     # Validar conteúdo básico
                     text_content = await article.text_content()
                     if not text_content or len(text_content.strip()) < 20:
+                        bot_logger.debug(f"Artigo {i} sem conteúdo suficiente: {len(text_content) if text_content else 0} chars")
                         continue
                     
                     # Filtrar elementos de UI/navegação
@@ -274,28 +382,42 @@ async def iterate_posts(page: Page, max_posts: int = 15, scroll_delay: float = 1
                     text_lower = text_content.lower()
                     if (len(text_content) < 80 and 
                         any(pattern in text_lower for pattern in ui_patterns)):
+                        bot_logger.debug(f"Artigo {i} filtrado por padrão UI")
                         continue
                     
                     # Artigo válido - adicionar à coleção
                     collected_articles.append(article)
-                    bot_logger.debug(f"Artigo {len(collected_articles)} coletado: {text_content[:40]}...")
+                    bot_logger.debug(f"Artigo {len(collected_articles)} coletado: {text_content[:60]}...")
                     
                 except Exception as e:
                     bot_logger.debug(f"Erro coletando artigo {i}: {e}")
                     continue
             
+            # Se não encontrou artigos, tentar scroll mais agressivo
+            if current_count == 0:
+                bot_logger.debug("Nenhum artigo encontrado - scroll agressivo")
+                # Rolar para o topo primeiro
+                await page.evaluate("window.scrollTo(0, 0)")
+                await asyncio.sleep(1)
+                # Depois rolar para baixo
+                await page.mouse.wheel(0, 1500)
+                await asyncio.sleep(2)
+                scroll_attempts += 1
+                continue
+            
             # Detecção de crescimento
             if current_count == last_count:
                 no_growth_cycles += 1
-                bot_logger.debug(f"Sem crescimento - ciclo {no_growth_cycles}")
+                bot_logger.debug(f"Sem crescimento - ciclo {no_growth_cycles} (última contagem: {last_count})")
                 
-                if no_growth_cycles >= 2:
-                    bot_logger.debug("Sem crescimento por 2 ciclos - parando coleta")
+                if no_growth_cycles >= 3:  # Aumentar tolerância
+                    bot_logger.debug("Sem crescimento por 3 ciclos - parando coleta")
                     break
                 
                 # Rolar para tentar carregar mais
-                await page.mouse.wheel(0, 1000)
-                await asyncio.sleep(scroll_delay * 1.5)
+                bot_logger.debug("Rolando para carregar mais conteúdo...")
+                await page.mouse.wheel(0, 1200)
+                await asyncio.sleep(scroll_delay * 2)
                 scroll_attempts += 1
             else:
                 no_growth_cycles = 0
@@ -308,6 +430,30 @@ async def iterate_posts(page: Page, max_posts: int = 15, scroll_delay: float = 1
             break
     
     bot_logger.info(f"Coleta concluída: {len(collected_articles)} artigos disponíveis")
+    
+    # Se não coletou nenhum artigo, fazer debug dump da página
+    if len(collected_articles) == 0:
+        try:
+            bot_logger.warning("Nenhum artigo coletado - criando debug dump")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Salvar screenshot da página
+            screenshot_path = Path(f"screenshots/debug_no_posts_{timestamp}.png")
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(screenshot_path), full_page=True)
+            
+            # Salvar HTML da página
+            html_path = Path(f"html_dumps/debug_no_posts_{timestamp}.html")
+            html_path.parent.mkdir(parents=True, exist_ok=True)
+            content = await page.content()
+            
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            bot_logger.warning(f"Debug dumps salvos: {screenshot_path}, {html_path}")
+            
+        except Exception as e:
+            bot_logger.warning(f"Erro ao criar debug dump: {e}")
     
     # Agora iterar pelos artigos coletados
     for i, article in enumerate(collected_articles):
@@ -529,8 +675,8 @@ async def extract_post_details(post: Locator):
 
 async def _extract_author(post: Locator):
     """
-    Extrai autor do post com validação robusta e múltiplas estratégias.
-    Procura por links de perfil e filtra elementos de UI.
+    Extrai autor do post baseado no exemplo do Facebook fornecido.
+    Foca em links de perfil com span[dir="auto"] visíveis.
     """
     
     # Padrões para excluir do autor (expandidos)
@@ -548,19 +694,21 @@ async def _extract_author(post: Locator):
         r'^(More|Mais|Less|Menos)$'
     ]
     
-    # Estratégia 1: Links de perfil com span[dir="auto"] não ocultos
+    # Estratégia 1: Seletores específicos baseados na estrutura real do Facebook
     try:
-        # Seletores mais robustos para perfis
+        # Seletores mais precisos baseados no HTML real
         profile_selectors = [
-            # Links diretos de perfil com spans visíveis
-            'a[role="link"][href*="/user/"]:visible span[dir="auto"]:not([aria-hidden="true"])',
-            'a[role="link"][href*="/profile.php"]:visible span[dir="auto"]:not([aria-hidden="true"])', 
-            'a[role="link"][href*="/people/"]:visible span[dir="auto"]:not([aria-hidden="true"])',
-            # Links de perfil em grupos
-            'a[role="link"][href*="/groups/"][href*="/user/"]:visible span[dir="auto"]:not([aria-hidden="true"])',
-            # Headers com strong/h3
+            # Padrão principal: a[role="link"] com span[dir="auto"] não oculto
+            'a[role="link"]:has(span[dir="auto"]:not([aria-hidden="true"])) span[dir="auto"]:not([aria-hidden="true"])',
+            # Links de perfil específicos
+            'a[role="link"][href*="/user/"] span[dir="auto"]:not([aria-hidden="true"])',
+            'a[role="link"][href*="/profile.php"] span[dir="auto"]:not([aria-hidden="true"])', 
+            'a[role="link"][href*="/people/"] span[dir="auto"]:not([aria-hidden="true"])',
+            # Headers com h3 ou strong
             'h3 a[role="link"] span[dir="auto"]:not([aria-hidden="true"])',
-            'strong a[role="link"] span[dir="auto"]:not([aria-hidden="true"])'
+            'strong a[role="link"] span[dir="auto"]:not([aria-hidden="true"])',
+            # Fallback para qualquer link com texto válido
+            'a[role="link"]:visible:not([href*="like"]):not([href*="comment"]):not([href*="share"]) span[dir="auto"]'
         ]
         
         for selector in profile_selectors:
@@ -666,30 +814,41 @@ async def _extract_author(post: Locator):
     return ""
 
 async def _extract_text(post: Locator):
-    """Extrai texto do post com expansão automática e filtros robustos."""
+    """Extrai texto do post baseado na estrutura real do Facebook."""
     
     # Primeiro, tentar expandir texto usando múltiplas estratégias
     try:
-        # Estratégia 1: Botões "Ver mais" tradicionais
+        # Estratégia 1: Buscar botões "Ver mais" mais agressivamente
         see_more_selectors = [
+            # Botões com role="button"
             'div[role="button"]:has-text("Ver mais")',
             'div[role="button"]:has-text("See more")',
             'span[role="button"]:has-text("Ver mais")',  
             'span[role="button"]:has-text("See more")',
+            # Botões sem role específico
+            'div:has-text("Ver mais"):not(:has(div))',
+            'span:has-text("Ver mais"):not(:has(span))',
+            'div:has-text("See more"):not(:has(div))',
+            'span:has-text("See more"):not(:has(span))',
             # Seletores mais específicos do Facebook
             '[data-testid="post_message"] div[role="button"]',
-            'div[data-ad-preview="message"] div[role="button"]'
+            'div[data-ad-preview="message"] div[role="button"]',
+            # Qualquer elemento clicável com "Ver mais"
+            '*[role="button"]:has-text("Ver mais")',
+            '*[role="button"]:has-text("See more")'
         ]
         
+        expanded = False
         for selector in see_more_selectors:
             try:
                 see_more_button = post.locator(selector).first()
                 if await see_more_button.count() > 0 and await see_more_button.is_visible():
                     button_text = await see_more_button.text_content()
                     if button_text and ('ver mais' in button_text.lower() or 'see more' in button_text.lower()):
-                        bot_logger.debug("Expandindo texto: clicando em 'Ver mais'")
+                        bot_logger.debug(f"Expandindo texto: clicando em '{button_text.strip()}'")
                         await see_more_button.click()
-                        await asyncio.sleep(1.5)  # Aguardar expansão
+                        await asyncio.sleep(2)  # Aguardar expansão
+                        expanded = True
                         break
             except Exception:
                 continue
@@ -707,59 +866,78 @@ async def _extract_text(post: Locator):
     except Exception:
         bot_logger.debug("Erro ao tentar expandir texto")
     
-    # Estratégia 1: Buscar div[dir="auto"] visíveis e não ocultos
+    # Aguardar se foi expandido
+    if expanded:
+        await asyncio.sleep(1)
+    
+    # Estratégia 1: Buscar texto principal em div[dir="auto"] não relacionados a UI
     try:
-        elements = post.locator('div[dir="auto"]:visible:not([aria-hidden="true"])')
+        # Primeiro, buscar div[dir="auto"] que não estão dentro de botões ou links
+        text_elements = post.locator('div[dir="auto"]:visible:not([aria-hidden="true"]):not(a div):not(button div):not([role="button"] div)')
         all_texts = []
         
-        count = await elements.count()
-        for i in range(count):
-            elem = elements.nth(i)
-            # Verificar se elemento está realmente visível
-            if await elem.is_visible():
-                text = (await elem.text_content() or "").strip()
-                if text:
-                    all_texts.append(text)
+        count = await text_elements.count()
+        bot_logger.debug(f"Encontrados {count} elementos div[dir='auto'] para texto")
         
-        # Filtrar textos válidos
+        for i in range(count):
+            elem = text_elements.nth(i)
+            try:
+                if await elem.is_visible():
+                    text = (await elem.text_content() or "").strip()
+                    if text and len(text) > 3:
+                        all_texts.append(text)
+                        bot_logger.debug(f"Texto encontrado: {text[:50]}...")
+            except Exception:
+                continue
+        
+        # Filtrar textos de UI
         ui_terms = [
-            'responder', 'comentar', 'compartilhar', 'curtir',
-            'reply', 'comment', 'share', 'like',
-            'ver mais', 'see more', 'mostrar mais', 'ver más', 'voir plus',
-            'follow', 'seguir', 'unfollow'
+            'curtir', 'comentar', 'compartilhar', 'responder',
+            'like', 'comment', 'share', 'reply',
+            'ver mais', 'see more', 'mostrar mais',
+            'follow', 'seguir', 'unfollow', 'ago', 'há',
+            'min', 'hora', 'hours', 'minutes'
         ]
         
+        # Filtrar textos válidos - mais permissivo
         filtered_texts = []
         for text in all_texts:
             text_clean = text.strip()
             text_lower = text_clean.lower()
             
-            # Filtrar textos curtos demais ou de UI
-            if (len(text_clean) > 1 and 
-                not re.match(r'^(responder|comentar|ver mais|see more)$', text_lower) and
-                not any(ui_term in text_lower for ui_term in ui_terms) and
-                not re.match(r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)', text_lower)):
+            # Filtros mais específicos
+            is_ui = (
+                len(text_clean) <= 3 or  # Muito curto
+                text_clean.isdigit() or  # Apenas números
+                re.match(r'^[·\s]+$', text_clean) or  # Apenas separadores
+                re.match(r'^\d+\s*(h|hr|min|m|d|hora|horas|ago|há)', text_lower) or  # Timestamp
+                any(ui_term == text_lower for ui_term in ui_terms) or  # UI exata
+                (len(text_clean) < 15 and any(ui_term in text_lower for ui_term in ['curtir', 'like', 'comment', 'share']))  # UI curta
+            )
+            
+            if not is_ui:
                 filtered_texts.append(text_clean)
         
         if filtered_texts:
-            # Juntar textos válidos
+            # Juntar textos preservando quebras de linha
             combined_text = '\n'.join(filtered_texts)
             
-            # Remover padrões de "Ver mais" e similares
+            # Limpar padrões residuais
             see_more_patterns = [
-                r'\b(See more|Ver mais|Mostrar mais|Ver más|Voir plus)\b',
-                r'\b(Continuar lendo|Continue reading|Lire la suite)\b'
+                r'\b(See more|Ver mais|Mostrar mais)\b',
+                r'\b(Continuar lendo|Continue reading)\b'
             ]
             
             for pattern in see_more_patterns:
                 combined_text = re.sub(pattern, '', combined_text, flags=re.IGNORECASE)
             
-            # Normalizar espaços e quebras
-            combined_text = re.sub(r'\n+', '\n', combined_text)
-            combined_text = re.sub(r' +', ' ', combined_text)
+            # Normalizar quebras duplas mas preservar estrutura
+            combined_text = re.sub(r'\n{3,}', '\n\n', combined_text)
+            combined_text = re.sub(r'[ \t]+', ' ', combined_text)  # Normalizar espaços
             combined_text = combined_text.strip()
             
-            if len(combined_text) >= 10:
+            if len(combined_text) >= 8:
+                bot_logger.debug(f"Texto extraído: {len(combined_text)} chars")
                 return combined_text
                 
     except Exception as e:

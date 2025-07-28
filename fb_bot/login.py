@@ -54,14 +54,11 @@ class PlaywrightFBLogin:
             ]
         }
         
-        # Tentar carregar storage state se existir
+        # Para launch_persistent_context, o storage_state é carregado automaticamente
+        # através do user_data_dir, então não precisamos especificar separadamente
         storage_state_path = Path(STORAGE_STATE_FILE)
         if storage_state_path.exists():
-            try:
-                context_options['storage_state'] = str(storage_state_path)
-                logging.info("🗂️ Carregando storage state salvo")
-            except Exception as e:
-                logging.warning(f"⚠️ Erro ao carregar storage state: {e}")
+            logging.info("🗂️ Storage state será carregado automaticamente via user_data_dir")
         
         self.context = await self.playwright.chromium.launch_persistent_context(**context_options)
         
