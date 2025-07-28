@@ -1,4 +1,3 @@
-
 import json
 import threading
 from pathlib import Path
@@ -11,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class StateManager:
     """Gerenciador de estado thread-safe para posts processados."""
-    
+
     def __init__(self, state_file: str = "processed_posts_state.json"):
         self.state_file = Path(state_file)
         self._processed_ids: Set[str] = set()
@@ -24,40 +23,48 @@ class StateManager:
             if self.state_file.exists():
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    
+
                 # Normalizar IDs antigos
                 normalized_ids = set()
                 for post_id in data:
                     normalized_id = self._normalize_post_id(post_id)
                     normalized_ids.add(normalized_id)
-                
+
                 self._processed_ids = normalized_ids
-                logger.info(f"Estado carregado: {len(self._processed_ids)} posts processados")
-                
+                # Log apenas na primeira inicialização ou quando houver mudança significativa
+                if not hasattr(self, '_last_logged_count'):
+                    logger.info(f"Estado carregado: {len(self._processed_ids)} posts processados")
+                    self._last_logged_count = len(self._processed_ids)
+                elif abs(len(self._processed_ids) - self._last_logged_count) > 5:
+                    logger.info(f"Estado atualizado: {len(self._processed_ids)} posts processados")
+                    self._last_logged_count = len(self._processed_ids)
+
                 # Salvar versão normalizada se houve mudanças
                 if len(normalized_ids) != len(data) or normalized_ids != set(data):
                     self._save_state()
             else:
                 logger.info("Arquivo de estado não encontrado, iniciando vazio")
-                
+                self._last_logged_count = 0
+
         except Exception as e:
             logger.error(f"Erro ao carregar estado: {e}")
             self._processed_ids = set()
+            self._last_logged_count = 0
 
     def _normalize_post_id(self, post_id: str) -> str:
         """Normaliza ID do post para formato consistente."""
         if not post_id:
             return post_id
-            
+
         # Se já é um permalink, limpar e retornar
         if post_id.startswith("permalink:"):
             url = post_id[10:]  # Remove "permalink:"
             return f"permalink:{self._clean_url(url)}"
-        
+
         # Se é URL direta, converter para permalink
         if post_id.startswith(("http://", "https://")):
             return f"permalink:{self._clean_url(post_id)}"
-        
+
         # Outros formatos mantém como estão
         return post_id
 
@@ -66,15 +73,15 @@ class StateManager:
         try:
             # Remove query parameters e fragments
             clean_url = url.split("?")[0].split("#")[0]
-            
+
             # Garantir que é URL válida
             parsed = urlparse(clean_url)
             if parsed.scheme and parsed.netloc:
                 return clean_url
-                
+
         except Exception:
             pass
-            
+
         return url
 
     def _save_state(self):
@@ -82,15 +89,15 @@ class StateManager:
         try:
             # Garantir que diretório existe
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # Converter set para lista para JSON
             data = list(self._processed_ids)
-            
+
             with open(self.state_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-                
+
             logger.debug(f"Estado salvo: {len(data)} posts")
-            
+
         except Exception as e:
             logger.error(f"Erro ao salvar estado: {e}")
 

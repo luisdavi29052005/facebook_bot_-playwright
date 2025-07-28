@@ -18,10 +18,18 @@ class BotConfig:
     @classmethod
     def load_from_env(cls) -> 'BotConfig':
         """Carrega configuração das variáveis de ambiente."""
+        # Reload dotenv to ensure latest values
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        
         config = cls()
         
         config.n8n_webhook_url = os.getenv('N8N_WEBHOOK_URL', '').strip()
         config.facebook_group_url = os.getenv('FACEBOOK_GROUP_URL', '').strip()
+        
+        # Fallback para FB_GROUP_URL se FACEBOOK_GROUP_URL não estiver definida
+        if not config.facebook_group_url:
+            config.facebook_group_url = os.getenv('FB_GROUP_URL', '').strip()
         
         # Carregar keywords
         keywords_str = os.getenv('KEYWORDS', '').strip()
