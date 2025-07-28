@@ -1,0 +1,132 @@
+Quero que você corrija e refatore meu projeto facebook_bot_-playwright. O bot monitora um grupo do Facebook, extrai autor, texto e imagem, envia ao n8n, recebe uma resposta de IA e comenta de volta. O projeto usa Playwright para automação, Flask para painel e requests para webhook do n8n. A tarefa, aplicar todas as correções listadas abaixo, tornar o loop assíncrono não bloqueante, padronizar seletores, consertar parada limpa, escrever testes e entregar um repositório funcionando, com passos de execução e validação.
+
+Mudanças gerais obrigatórias
+1, requirements.txt
+, Fixar versões, flask==3.0.2, playwright==1.43.0, python-dotenv==1.0.0, aiohttp==3.9.5, pytest==8.2.0, pytest-asyncio==0.23.7
+, Remover supabase se não houver uso real, ou implementar de fato
+, Adicionar playwright install no setup de execução
+
+2, Estrutura e qualidade
+, Adicionar ruff e mypy opcionais, ruff==0.5.7, mypy==1.10.0
+, Ativar type hints nos módulos principais
+, Escrever docstrings objetivas nas funções públicas
+, Reduzir logs ruidosos e padronizar níveis, info, warning, error
+
+3, Assíncrono sem bloqueio
+, Substituir todas as chamadas requests por aiohttp, ou encapsular em asyncio.to_thread quando mantiver requests
+, Garantir que nenhuma chamada de rede bloqueie o event loop do Playwright
+
+4, Testes automatizados com pytest
+, Criar testes para, _extract_author, _extract_text, _extract_images, commenter.send_comment com mocks do Playwright
+, Criar fixtures simples com HTML minimamente realista de posts
+, Adicionar um teste de integração leve para o fluxo ask_n8n com aiohttp test server ou responses equivalente
+
+Mudanças por arquivo
+
+app.py, servidor Flask
+, Parada limpa, criar stop_event, threading.Event global, expor em app context, no endpoint, api/stop, setar stop_event.set, no start limpar com clear
+, Loop principal deve checar stop_event entre ciclos, ver main.py
+, Guardar e gerenciar uma única thread do bot, bot_thread, não iniciar nova se bot_thread.is_alive
+, Ao parar, fazer join com timeout razoável e retornar status
+, save_config, ao gravar .env, usar escrita atômica, gravar em arquivo temporário e renomear, proteger com threading.Lock
+, Após salvar, recarregar config em memória, BotConfig.load_from_env e aplicar no módulo fb_bot.config
+, Se variáveis críticas mudarem, url do grupo, intervalos, reiniciar bot de forma segura
+
+main.py, loop principal e processamento
+, Usar config.max_posts_per_cycle, remover literais como 15
+, Validar config.loop_interval_seconds na carga, mínimo 30 segundos, máximo 3600 segundos, se fora do intervalo, ajustar para o limite
+, Remover import duplicado de navigate_to_group em favor do método da classe PlaywrightFBLogin
+, Implementar parada limpa, while True, checar stop_event.is_set, se setado, sair do loop, fechar contexto do Playwright e encerrar
+, Todas as chamadas n8n assíncronas via aiohttp com timeout e backoff exponencial simples, por exemplo 1, 2, 4 até o máximo
+, Diferenciar erros temporários de permanentes ao processar posts, registrar seletor ausente, timeouts, layout inesperado, e pular com retry limitado
+, Garantir await login_manager.aexit ao finalizar
+
+fb_bot/login.py, gerenciamento de login
+, _check_login_status, exigir múltiplos sinais simultâneos, ausência de campo email, presença de elementos de navegação do feed, barra superior, avatar, e capacidade de abrir o menu
+, _try_cookie_login, filtrar cookies para domínios .facebook.com, ajustar datas de expiração inválidas quando necessário, ignorar cookies de domínios não relacionados
+, user_data_dir e storage_state, ou remover _save_storage_state se não usar, ou usar de forma consistente via parâmetro storage_state em launch_persistent_context
+, _perform_manual_login, timeout global, se checkpoint persistir, retornar erro orientando o usuário a resolver manualmente
+, Adicionar logs objetivos de cada etapa, início de sessão, cookies aplicados, status de login confirmado
+
+fb_bot/monitor.py, seleção e extração
+, Consolidar navegação para grupo, deixar apenas a implementação da classe em login.py, deletar ou renomear a função local para evitar colisão
+, Simplificar e tornar robusto _extract_author
+, Buscar por links visíveis de perfil, a[href*="facebook.com"], a[href*="/user/"], a[href*="/profile.php"]
+, Usar inner_text, pegar parte antes de ‘·’, validar que pareça nome, pelo menos duas palavras e com letras
+, Aguardar cabeçalho renderizado antes de extrair, por exemplo h3 ou contêiner do autor
+, Implementar retry leve caso o cabeçalho ainda não esteja pronto
+, Ajustar _extract_text
+, Usar inner_text em vez de text_content
+, Considerar linhas com mais de 10 caracteres contendo letras, remover linhas de UI como “Ver mais”, “Ver tradução”, mantendo conteúdo do post
+, iterate_posts, quebrar em funções menores, encontrar_posts_visiveis, rolar_pagina, coletar_detalhes_do_post, e limites claros de rolagem por ciclo
+, Registro de HTML de depuração apenas quando falhar após todas as estratégias, salvar amostra controlada para análise, não poluir o disco
+
+fb_bot/commenter.py, abrir e enviar comentários
+, open_comment_box, além de textos Comentar e Comment, procurar por aria-label genérico, [aria-label*="oment" i], e por ícones com data-testid de comentário, subindo no DOM até o botão pai
+, send_comment, após Enter, aguardar curto período, clicar fora da caixa para confirmar envio ou acionar botão Postar quando houver, incluir seletores de botão de envio que variam por layout
+, Detectar captcha e bloqueios, presença de iframe src*="captcha", quando detectado, pausar e avisar usuário
+
+state_manager.py, estado dos posts
+, Proteger acesso com threading.Lock para leitura e escrita de processed_posts_state.json
+, Padronizar post_id, sempre URL canônica do post, ou um ID numérico estável, converter entradas antigas ao carregar
+, Garantir force_save ao encerrar, por exemplo no caminho de parada do bot
+
+Comunicação com n8n, healthcheck e ask
+, Transformar healthcheck_n8n e ask_n8n em funções assíncronas com aiohttp, incluir timeout, por exemplo 10 segundos, e backoff exponencial
+, Propagar erros de rede de forma tratável, sem travar o event loop
+, Validar payloads antes do envio, autor, texto, imagens, ids
+
+Config e validação
+, BotConfig, validar loop_interval_seconds, limites mínimos e máximos
+, Expor max_posts_per_cycle e respeitar no iterate_posts
+, Recarregar config após save_config, refletindo no runtime
+
+Código exemplo para _extract_author, favor adaptar e cobrir com testes
+
+python
+Copy
+Edit
+async def _extract_author(post: Locator) -> str:
+    candidates = post.locator("a[href*='facebook.com'], a[href*='/user/'], a[href*='/profile.php']")
+    count = await candidates.count()
+    for i in range(count):
+        link = candidates.nth(i)
+        if await link.is_visible():
+            raw = (await link.inner_text() or "").strip()
+            name = raw.split("·")[0].strip()
+            if len(name.split()) >= 2 and re.search(r"[A-Za-zÀ-ÿ]", name):
+                return name
+    return ""
+Testes a implementar
+, Testar _extract_author com diferentes variantes de HTML, com e sem separador ·, com nomes de uma e duas palavras, com link invisível
+, Testar _extract_text com nós múltiplos e com elementos de UI misturados
+, Testar commenter.open_comment_box e send_comment simulando botão com texto, com aria-label e com ícone, verificar fallback ao botão Postar
+, Testar state_manager concorrente com writes simultâneos, usar tmpdir do pytest
+, Testar ask_n8n com aiohttp test server, validar timeouts e retries
+
+Scripts de execução e validação
+, Preparar um comando make simples ou scripts no README
+, Instalar dependências, pip install -r requirements.txt
+, Instalar navegadores, playwright install
+, Rodar testes, pytest -q
+, Executar app, python app.py, iniciar bot pelo endpoint api/start, parar via api/stop, verificar que a thread não duplica e que o stop é limpo
+
+Critérios de aceite, Done quando
+, O bot inicia, autentica e navega até o grupo, sem travar o event loop
+, A extração retorna autor, texto e pelo menos uma imagem quando disponível, com taxa de falha reduzida e dumps apenas quando todas as estratégias falham
+, O loop respeita max_posts_per_cycle e loop_interval_seconds validados
+, A parada via api/stop é limpa, sem threads órfãs e com salvamento de estado
+, As chamadas ao n8n são assíncronas, com timeout e retries, sem bloquear o Playwright
+, Os testes cobrem cenários críticos e passam em CI local
+, O README explica setup, execução e troubleshooting de forma breve e objetiva
+
+Entregáveis
+, Código alterado conforme os itens acima
+, Testes pytest e arquivos de fixture
+, README atualizado com passos de instalação, execução e testes
+, Changelog curto listando mudanças
+
+Observações finais
+, Não introduzir dependências além das listadas
+, Manter estilo de logs simples e úteis, sem emojis
+, Evitar funções monolíticas, preferir funções curtas com responsabilidade única
