@@ -219,7 +219,13 @@ class PlaywrightFBLogin:
                 if await self._quick_login_check():
                     logging.info("✅ Login manual detectado com sucesso!")
                     logging.info("💾 Salvando sessão permanentemente...")
-                    await asyncio.sleep(5)  # Aguardar estabilização da sessão
+                    
+                    # Aguardar estabilização da sessão com espera inteligente
+                    try:
+                        await self.page.wait_for_load_state('networkidle', timeout=10000)
+                    except Exception:
+                        await asyncio.sleep(3)  # Fallback mínimo
+                        
                     logging.info("🎉 Sessão salva! Próximas execuções serão automáticas!")
                     return True
                     

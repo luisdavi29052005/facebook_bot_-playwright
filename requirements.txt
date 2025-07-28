@@ -4,3 +4,4 @@ python-dotenv
 webdriver-manager
 flask
 playwright
+supabase

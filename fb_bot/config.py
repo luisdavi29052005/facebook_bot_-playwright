@@ -1,4 +1,3 @@
-
 import os
 import json
 from dotenv import load_dotenv
@@ -15,9 +14,10 @@ class BotConfig:
     facebook_group_url: str
     headless: bool
     loop_interval_seconds: int
+    max_posts_per_cycle: int
     keywords: List[str]
     cookies_path: str = "./cookies.json"
-    
+
     @classmethod
     def load_from_env(cls) -> 'BotConfig':
         """Carrega configurações do ambiente."""
@@ -30,15 +30,16 @@ class BotConfig:
                 keywords = [k.strip() for k in keywords_env.split(",") if k.strip()]
         except (json.JSONDecodeError, ValueError):
             keywords = []
-        
+
         return cls(
             n8n_webhook_url=os.getenv("N8N_WEBHOOK_URL", ""),
             facebook_group_url=os.getenv("FACEBOOK_GROUP_URL", ""),
             headless=os.getenv("HEADLESS", "true").lower() in ("true", "1", "t", "yes"),
             loop_interval_seconds=int(os.getenv("LOOP_INTERVAL_SECONDS", "60")),
+            max_posts_per_cycle=int(os.getenv("MAX_POSTS_PER_CYCLE", "15")),
             keywords=keywords
         )
-    
+
     def is_valid(self) -> tuple[bool, str]:
         """Valida se as configurações estão corretas."""
         if not self.n8n_webhook_url:

@@ -6,7 +6,7 @@ from logger import setup_logging, bot_logger
 from state_manager import StateManager
 from fb_bot.config import config
 from fb_bot.login import fb_login
-from fb_bot.monitor import extract_post_details, extract_post_id, find_next_valid_post
+from fb_bot.monitor import navigate_to_group, find_next_valid_post, extract_post_id, extract_post_details, iterate_posts
 from fb_bot.commenter import open_comment_box, send_comment
 from fb_bot.n8n_client import ask_n8n, healthcheck_n8n
 
@@ -166,12 +166,9 @@ async def main_loop():
             posts_found = 0
             leads_found = 0
 
-            for post_index in range(15):  # Máximo 15 posts por ciclo
+            # Use iterate_posts to iterate through posts with progressive scrolling
+            async for post_element in iterate_posts(page, max_posts=15):
                 try:
-                    post_element = await find_next_valid_post(page, post_index)
-                    if not post_element:
-                        break
-
                     posts_found += 1
                     success = await processor.process_post(post_element, page)
 
@@ -182,7 +179,7 @@ async def main_loop():
                         await asyncio.sleep(3)   # Pausa menor
 
                 except Exception as e:
-                    bot_logger.error(f"Erro processando post {post_index + 1}: {e}")
+                    bot_logger.error(f"Erro processando post: {e}")
                     continue
 
             # Controle de ciclos vazios
