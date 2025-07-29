@@ -251,13 +251,13 @@ async def main_loop():
                     bot_logger.error(f"Erro ao navegar para grupo: {e}")
                     continue
 
-                # NOVO FLUXO SEQUENCIAL: processar UM post por vez
+                # PROCESSAMENTO SEQUENCIAL: UM POST POR VEZ (CICLO COMPLETO)
                 posts_found = 0
                 leads_found = 0
 
-                bot_logger.debug("🔄 Iniciando processamento sequencial de posts...")
+                bot_logger.info("🔄 Iniciando processamento sequencial (um post por vez)...")
 
-                # Loop para processar posts até o limite por ciclo
+                # Loop sequencial: busca → processa → scroll → repete
                 for post_number in range(config.max_posts_per_cycle):
                     if stop_event.is_set():
                         bot_logger.info("Stop event detectado, parando processamento")
@@ -268,41 +268,62 @@ async def main_loop():
                             bot_logger.warning("Página fechada durante processamento - interrompendo")
                             break
 
-                        # PASSO 1: Encontrar próximo post válido
-                        bot_logger.debug(f"🔍 Buscando post #{post_number + 1}...")
+                        # ═══ ETAPA 1: BUSCAR PRÓXIMO POST VÁLIDO ═══
+                        bot_logger.info(f"🔍 Buscando post #{post_number + 1}/{config.max_posts_per_cycle}...")
+
                         post_element = await find_next_valid_post(page)
 
                         if not post_element:
-                            bot_logger.warning(f"❌ Nenhum post válido encontrado para #{post_number + 1}")
-                            # Rolar mais e tentar novamente
+                            bot_logger.warning(f"❌ Nenhum post válido encontrado")
+
+                            # Tentativa de recuperação: scroll mais agressivo
+                            bot_logger.debug("🔄 Tentando scroll para encontrar mais posts...")
                             try:
-                                await page.mouse.wheel(0, 1500)
-                                await asyncio.sleep(3)
-                                post_element = await find_next_valid_post(page)
+                                for scroll_attempt in range(2):
+                                    await page.mouse.wheel(0, 1500)
+                                    await asyncio.sleep(4)
+
+                                    post_element = await find_next_valid_post(page)
+                                    if post_element:
+                                        bot_logger.debug(f"✅ Post encontrado após scroll {scroll_attempt + 1}")
+                                        break
 
                                 if not post_element:
-                                    bot_logger.warning("❌ Nenhum post encontrado após scroll adicional")
+                                    bot_logger.warning("❌ Nenhum post encontrado mesmo após scroll - finalizando ciclo")
                                     break
+
                             except Exception as e:
-                                bot_logger.warning(f"Erro ao rolar página: {e}")
+                                bot_logger.warning(f"Erro durante scroll de recuperação: {e}")
                                 break
 
                         posts_found += 1
-                        bot_logger.info(f"✅ Post #{post_number + 1} encontrado - iniciando processamento")
+                        bot_logger.success(f"✅ POST #{post_number + 1} ENCONTRADO - iniciando processamento completo")
 
-                        # PASSO 2: Processar o post (extrair → enviar para n8n → comentar)
+                        # ═══ ETAPA 2: PROCESSAR POST COMPLETAMENTE ═══
+                        # (extrair dados → enviar n8n → aguardar IA → comentar)
+
                         success = await processor.process_post(post_element, page)
 
                         if success:
                             leads_found += 1
-                            bot_logger.info(f"🎯 LEAD #{leads_found} processado com sucesso!")
+                            bot_logger.success(f"🎯 LEAD #{leads_found} PROCESSADO COM SUCESSO!")
 
-                            # Pausa maior após comentário bem-sucedido
+                            # Pausa pós-comentário (evitar spam)
                             bot_logger.debug("⏸️ Pausa pós-comentário (15s)")
                             await asyncio.sleep(15)
                         else:
-                            bot_logger.debug("⏸️ Post processado sem comentário (3s)")
-                            await asyncio.sleep(3)
+                            bot_logger.debug("⏸️ Post processado sem comentário - pausa breve")
+                            await asyncio.sleep(5)
+
+                        # ═══ ETAPA 3: PREPARAR PARA PRÓXIMO POST ═══
+
+                        # Scroll para "consumir" o post atual e revelar próximos
+                        try:
+                            bot_logger.debug("📜 Scroll pós-processamento...")
+                            await page.mouse.wheel(0, 800)
+                            await asyncio.sleep(2)
+                        except Exception as e:
+                            bot_logger.debug(f"Erro no scroll pós-processamento: {e}")
 
                         # Verificação de integridade da página
                         try:
@@ -311,11 +332,22 @@ async def main_loop():
                             bot_logger.warning("❌ Página não responde - interrompendo ciclo")
                             break
 
-                        bot_logger.debug(f"✅ Post #{post_number + 1} concluído - avançando para próximo")
+                        bot_logger.info(f"✅ Post #{post_number + 1} CONCLUÍDO - próximo post...")
+
+                        # Pausa entre posts para naturalidade
+                        await asyncio.sleep(3)
 
                     except Exception as e:
-                        bot_logger.error(f"❌ Erro processando post #{post_number + 1}: {e}")
-                        # Continuar para próximo post mesmo com erro
+                        bot_logger.error(f"❌ Erro crítico processando post #{post_number + 1}: {e}")
+
+                        # Tentar recuperar com scroll
+                        try:
+                            await page.mouse.wheel(0, 1000)
+                            await asyncio.sleep(3)
+                        except Exception:
+                            pass
+
+                        # Continuar para próximo post
                         continue
 
                 # Controle de ciclos vazios

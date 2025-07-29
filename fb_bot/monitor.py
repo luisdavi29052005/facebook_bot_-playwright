@@ -234,36 +234,61 @@ async def wait_post_ready(post: Locator):
 
 async def is_valid_post(article) -> bool:
     """
-    Valida se o elemento é um post real de usuário - VERSÃO SIMPLIFICADA.
+    Valida se o elemento é um post real - OTIMIZADO para processamento sequencial.
+    
+    Critérios rápidos para filtrar:
+    - Deve ter estrutura de post (role=article OU indicadores básicos)
+    - Não deve ser elemento de UI/navegação
+    - Deve ter conteúdo mínimo (autor E/OU texto/imagem)
     
     Args:
         article: Elemento do artigo a ser validado
         
     Returns:
-        bool: True se for um post válido, False caso contrário
+        bool: True se for um post válido
     """
     try:
-        # Verificação básica: se tem role="article" já é um bom indicador
+        # ═══ VALIDAÇÃO RÁPIDA ═══
+        
+        # 1. Verificar role="article" (indicador mais confiável)
         role = await article.get_attribute("role")
         if role == "article":
-            bot_logger.debug("Post validado: role=article")
-            return True
-        
-        # Verificar se tem estrutura básica de post (autor OU conteúdo)
-        has_author = await _has_any_author_indicator(article)
-        has_content = await _has_any_content(article)
-        
-        if has_author or has_content:
-            # Verificar se não é claramente elemento de UI
+            # Verificação adicional: não deve ser elemento de UI óbvio
             if not await _is_obvious_ui_element(article):
-                bot_logger.debug("Post validado: tem autor/conteúdo e não é UI")
+                bot_logger.debug("✅ Post validado: role=article + não é UI")
                 return True
         
-        bot_logger.debug("Post rejeitado: não passou na validação básica")
+        # 2. Se não tem role="article", fazer verificações mais específicas
+        
+        # Verificar se tem indicadores básicos de post
+        has_author_indicator = await _has_author_indicator_fast(article)
+        has_content_indicator = await _has_content_indicator_fast(article)
+        
+        # Precisa ter pelo menos UM indicador válido
+        if not (has_author_indicator or has_content_indicator):
+            bot_logger.debug("❌ Post rejeitado: sem indicadores básicos")
+            return False
+        
+        # 3. Filtrar elementos claramente de UI
+        if await _is_obvious_ui_element(article):
+            bot_logger.debug("❌ Post rejeitado: elemento de UI")
+            return False
+        
+        # 4. Verificar se tem timestamp (posts reais têm timestamp)
+        if await _has_timestamp_indicator(article):
+            bot_logger.debug("✅ Post validado: tem timestamp + indicadores")
+            return True
+        
+        # 5. Fallback: se tem conteúdo suficiente, aceitar
+        if has_author_indicator and has_content_indicator:
+            bot_logger.debug("✅ Post validado: autor + conteúdo")
+            return True
+        
+        bot_logger.debug("❌ Post rejeitado: não passou nas validações")
         return False
         
     except Exception as e:
-        bot_logger.debug(f"Erro na validação do post: {e}")
+        bot_logger.debug(f"⚠️ Erro na validação do post: {e}")
         return False
 
 async def _has_valid_timestamp(article) -> bool:
@@ -423,49 +448,42 @@ async def _is_ui_element(article) -> bool:
         bot_logger.debug(f"Erro ao verificar UI element: {e}")
         return False
 
-async def _has_any_author_indicator(article) -> bool:
-    """Verifica se há qualquer indicador de autor no post."""
+async def _has_author_indicator_fast(article) -> bool:
+    """Verificação rápida de indicadores de autor."""
     try:
-        # Buscar por elementos que tipicamente contêm nomes de autor
-        author_indicators = [
-            'h3',                    # Cabeçalhos principais
-            'strong',                # Texto em negrito (nomes)
-            'a[role="link"]',        # Links de perfil
-            'span[dir="auto"]'       # Texto direcional (nomes)
-        ]
+        # Verificar se tem h3 (onde normalmente fica o autor)
+        h3_elements = article.locator('h3')
+        if await h3_elements.count() > 0:
+            # Verificar se o primeiro h3 tem conteúdo de autor
+            first_h3 = h3_elements.first()
+            text = await first_h3.text_content()
+            if text and len(text.strip()) >= 3:
+                # Filtrar timestamps e UI
+                text_lower = text.lower().strip()
+                if not any(ui_term in text_lower for ui_term in [
+                    'min', 'hora', 'h', 'd', 'há', 'ago', 'like', 'comment', 'share'
+                ]):
+                    return True
         
-        for selector in author_indicators:
-            try:
-                elements = article.locator(selector)
-                count = await elements.count()
-                
-                for i in range(min(count, 3)):  # Verificar apenas os primeiros 3
-                    elem = elements.nth(i)
-                    if await elem.is_visible():
-                        text = await elem.text_content()
-                        if text and len(text.strip()) >= 3:
-                            # Se tem texto que parece nome, considerar válido
-                            if not any(ui_word in text.lower() for ui_word in [
-                                'min', 'hora', 'like', 'comment', 'share', 'curtir'
-                            ]):
-                                return True
-            except Exception:
-                continue
+        # Verificar links de perfil
+        profile_links = article.locator('a[role="link"]')
+        if await profile_links.count() > 0:
+            return True
         
         return False
         
     except Exception:
         return False
 
-async def _has_any_content(article) -> bool:
-    """Verifica se há qualquer conteúdo no post."""
+async def _has_content_indicator_fast(article) -> bool:
+    """Verificação rápida de indicadores de conteúdo."""
     try:
-        # Verificar se tem texto
+        # Verificar se tem texto significativo
         text_content = await article.text_content()
-        if text_content and len(text_content.strip()) > 20:
+        if text_content and len(text_content.strip()) > 30:
             return True
         
-        # Verificar se tem imagem
+        # Verificar se tem imagem do Facebook
         images = article.locator('img[src*="scontent"]')
         if await images.count() > 0:
             return True
@@ -480,24 +498,58 @@ async def _has_any_content(article) -> bool:
     except Exception:
         return False
 
-async def _is_obvious_ui_element(article) -> bool:
-    """Verifica se é obviamente um elemento de interface."""
+async def _has_timestamp_indicator(article) -> bool:
+    """Verificação rápida de timestamp (posts reais têm timestamp)."""
     try:
+        # Verificar elementos comuns de timestamp
+        timestamp_selectors = [
+            'time[datetime]',
+            'a[href*="story_fbid"]',
+            'span:regex("^\\d+\\s*(min|h|d|hora)")'
+        ]
+        
+        for selector in timestamp_selectors:
+            try:
+                if await article.locator(selector).count() > 0:
+                    return True
+            except Exception:
+                continue
+        
+        return False
+        
+    except Exception:
+        return False
+
+async def _is_obvious_ui_element(article) -> bool:
+    """Verificação rápida de elementos de UI óbvios."""
+    try:
+        # Pegar apenas primeiros 200 caracteres para performance
         text_content = await article.text_content()
         if not text_content:
             return False
         
-        text_lower = text_content.lower()
+        text_snippet = text_content[:200].lower()
         
-        # Elementos claramente de UI
-        obvious_ui_keywords = [
-            'create post', 'escreva algo', 'write something',
-            'what\'s on your mind', 'no que você está pensando',
-            'sponsored', 'patrocinado', 'publicidade',
-            'suggested for you', 'sugestões para você'
+        # Palavras-chave que identificam UI do Facebook
+        ui_keywords = [
+            'escreva algo', 'write something', 'what\'s on your mind',
+            'no que você está pensando', 'create post', 'criar publicação',
+            'sponsored', 'patrocinado', 'publicidade', 'ad',
+            'suggested for you', 'sugestões para você',
+            'happening now', 'acontecendo agora',
+            'join group', 'participar do grupo'
         ]
         
-        return any(keyword in text_lower for keyword in obvious_ui_keywords)
+        # Se encontrar qualquer keyword de UI, rejeitar
+        for keyword in ui_keywords:
+            if keyword in text_snippet:
+                return True
+        
+        # Se o texto é muito curto, provavelmente é UI
+        if len(text_content.strip()) < 15:
+            return True
+        
+        return False
         
     except Exception:
         return False
@@ -578,126 +630,97 @@ async def _has_minimum_content(article) -> bool:
 
 async def find_next_valid_post(page: Page) -> Locator:
     """
-    NOVA FUNÇÃO: Encontra o próximo post válido de forma sequencial.
-
-    Processa UM post por vez:
-    1. Rola a página se necessário
-    2. Encontra posts disponíveis
-    3. Retorna o PRIMEIRO post válido encontrado
-    4. Não coleta múltiplos posts
-
+    Encontra o PRÓXIMO post válido de forma sequencial - UM POR VEZ.
+    
+    Fluxo:
+    1. Procura posts visíveis na tela atual
+    2. Retorna o PRIMEIRO post válido encontrado
+    3. Se não encontrar, rola página e tenta novamente
+    4. Foco em processamento individual, não em lote
+    
+    Args:
+        page: Página do Playwright
+        
     Returns:
         Locator do próximo post válido ou None se não encontrou
     """
-    bot_logger.debug("🔍 Procurando próximo post válido...")
+    bot_logger.debug("🔍 Buscando próximo post válido (um por vez)...")
 
     # Verificar se página ainda está ativa
     if page.is_closed():
         bot_logger.warning("Página fechada - cancelando busca")
         return None
 
-    # Aguardar página carregar
+    # Aguardar estabilidade da página
     try:
-        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        await page.wait_for_load_state("domcontentloaded", timeout=8000)
     except Exception:
         bot_logger.debug("Timeout domcontentloaded - continuando")
 
-    # Rolar uma vez para ativar carregamento
-    try:
-        await page.mouse.wheel(0, 800)
-        await asyncio.sleep(2)
-    except Exception as e:
-        bot_logger.debug(f"Erro ao rolar: {e}")
-
-    # Aguardar conteúdo carregar
-    await asyncio.sleep(3)
-
-    # Usar seletores mais amplos e simples
-    article_selectors = [
-        'div[role="article"]',           # Padrão do Facebook
-        'article[role="article"]',       # Alternativo
-        'div[data-pagelet^="FeedUnit_"]' # Posts individuais
+    # Seletores priorizados para posts do Facebook
+    post_selectors = [
+        'div[role="article"]',                    # Padrão principal
+        'article[role="article"]',                # Alternativo
+        'div[data-pagelet^="FeedUnit_"]'         # Posts específicos
     ]
 
-    # Procurar posts de forma mais permissiva
-    for selector_index, selector in enumerate(article_selectors):
-        try:
-            bot_logger.debug(f"🔍 Testando seletor {selector_index + 1}/{len(article_selectors)}: {selector}")
-            
-            articles = page.locator(selector)
-            count = await articles.count()
+    # Tentar encontrar post na viewport atual primeiro
+    for attempt in range(2):  # Máximo 2 tentativas (atual + scroll)
+        
+        if attempt == 1:
+            # Segunda tentativa: rolar para carregar mais conteúdo
+            bot_logger.debug("📜 Rolando para carregar mais posts...")
+            try:
+                await page.mouse.wheel(0, 1000)
+                await asyncio.sleep(3)  # Aguardar carregamento
+            except Exception as e:
+                bot_logger.debug(f"Erro ao rolar: {e}")
+                break
 
-            bot_logger.debug(f"   📊 {count} elementos encontrados")
+        # Buscar posts com cada seletor
+        for selector_idx, selector in enumerate(post_selectors):
+            try:
+                bot_logger.debug(f"🔍 Tentativa {attempt + 1} - Seletor {selector_idx + 1}: {selector}")
+                
+                posts = page.locator(selector)
+                count = await posts.count()
+                
+                bot_logger.debug(f"   📊 {count} elementos encontrados")
 
-            if count > 0:
-                # Verificar cada post sequencialmente (máximo 10 para performance)
-                max_to_check = min(count, 10)
-                for i in range(max_to_check):
+                if count == 0:
+                    continue
+
+                # Verificar posts sequencialmente (máximo 8 para performance)
+                max_check = min(count, 8)
+                for i in range(max_check):
                     try:
-                        article = articles.nth(i)
+                        post = posts.nth(i)
 
-                        # Verificar visibilidade básica
-                        if not await article.is_visible():
-                            bot_logger.debug(f"   ⏭️ Post {i} não visível")
+                        # Verificação básica de visibilidade
+                        if not await post.is_visible():
                             continue
 
-                        # Aguardar carregar (timeout menor)
+                        # Aguardar elemento estar pronto (timeout baixo)
                         try:
-                            await article.wait_for_selector('*', timeout=2000)
+                            await post.wait_for_selector('*', timeout=1500)
                         except Exception:
                             pass
 
-                        # Validação simplificada
-                        if await is_valid_post(article):
-                            bot_logger.debug(f"   ✅ Post válido encontrado! (seletor: {selector}, índice: {i})")
-                            return article
-                        else:
-                            bot_logger.debug(f"   ❌ Post {i} rejeitado")
-                            continue
+                        # Validação de post (filtros de qualidade)
+                        if await is_valid_post(post):
+                            bot_logger.success(f"✅ POST VÁLIDO encontrado! (seletor: {selector}, posição: {i})")
+                            return post
 
                     except Exception as e:
                         bot_logger.debug(f"   ⚠️ Erro verificando post {i}: {e}")
                         continue
 
-                bot_logger.debug(f"   🔄 Nenhum post válido com seletor: {selector}")
-
-        except Exception as e:
-            bot_logger.debug(f"   ❌ Erro com seletor {selector}: {e}")
-            continue
-
-    # Se não encontrou posts válidos, tentar rolar mais e buscar novamente
-    bot_logger.debug("📜 Nenhum post válido encontrado, rolando mais...")
-
-    try:
-        # Rolar mais agressivamente
-        await page.mouse.wheel(0, 1200)
-        await asyncio.sleep(3)
-
-        # Tentar novamente com o primeiro seletor
-        articles = page.locator(article_selectors[0])
-        count = await articles.count()
-
-        bot_logger.debug(f"Após scroll: {count} elementos encontrados")
-
-        for i in range(count):
-            try:
-                article = articles.nth(i)
-
-                if await article.is_visible():
-                    await wait_post_ready(article)
-
-                    if await is_valid_post(article):
-                        bot_logger.debug(f"✅ Post válido encontrado após scroll (índice {i})")
-                        return article
-
             except Exception as e:
-                bot_logger.debug(f"Erro verificando post após scroll {i}: {e}")
+                bot_logger.debug(f"   ❌ Erro com seletor {selector}: {e}")
                 continue
 
-    except Exception as e:
-        bot_logger.debug(f"Erro ao rolar para buscar mais posts: {e}")
-
-    bot_logger.warning("❌ Nenhum post válido encontrado")
+    # Se chegou aqui, não encontrou nenhum post válido
+    bot_logger.warning("❌ Nenhum post válido encontrado após busca completa")
     return None
 
 async def extract_post_id(post_element: Locator):
@@ -899,77 +922,313 @@ async def extract_post_details(post: Locator):
 
 async def _extract_author(post: Locator) -> str:
     """
-    Extrai autor do post focando em estruturas reais como nas imagens mostradas.
+    Extrai autor do post APENAS a partir do elemento timestamp,
+    garantindo que é o autor real do post principal e não de comentários.
     """
     import re
 
     # Aguardar elementos carregarem
     try:
-        await post.wait_for_selector('h3, strong, a[role="link"]', timeout=2000)
+        await post.wait_for_selector('[href*="comment_id"], time, [aria-label*="há"], [aria-label*="ago"]', timeout=3000)
     except Exception:
         pass
 
-    # Estratégias mais amplas para capturar nomes como "Lauren Raven-Hill", "Michelle Smith Gehrig"
-    author_strategies = [
-        # Estratégia 1: Links em h3 (mais comum)
-        'h3 a[role="link"] span[dir="auto"]',
-        'h3 a[role="link"] strong',
-        'h3 a span[dir="auto"]',
-        
-        # Estratégia 2: Strong dentro de h3
-        'h3 strong:not(:has-text("min")):not(:has-text("h")):not(:has-text("d"))',
-        'h3 span[dir="auto"]:first-child',
-        
-        # Estratégia 3: Links de perfil diretos
-        'a[href*="/profile.php"] span[dir="auto"]',
-        'a[href*="/user/"] span[dir="auto"]',
-        'a[href*="facebook.com/"] span[dir="auto"]',
-        
-        # Estratégia 4: Busca mais geral
-        'strong a[role="link"]',
-        'span[dir="auto"] strong',
-        
-        # Estratégia 5: Primeiro elemento forte visível
-        'strong:first-of-type:not(:has-text("Like")):not(:has-text("Comment"))'
+    # ESTRATÉGIA PRINCIPAL: Encontrar o timestamp primeiro e buscar o autor adjacente
+    # O timestamp é o indicador mais confiável de onde está o header do post
+    timestamp_selectors = [
+        'a[href*="comment_id"]',  # Link do timestamp (mais comum)
+        'time[datetime]',
+        'a[href*="story_fbid"]',
+        'span:regex("^\\d+\\s*(min|h|d|dia|dias|hora|horas)$")',
+        '[aria-label*="há"]',
+        '[aria-label*="ago"]'
     ]
 
-    for strategy in author_strategies:
+    for ts_selector in timestamp_selectors:
         try:
-            elements = post.locator(strategy)
-            count = await elements.count()
+            timestamp_elements = post.locator(ts_selector)
+            ts_count = await timestamp_elements.count()
             
-            for i in range(min(count, 3)):  # Verificar até 3 elementos
+            for ts_idx in range(min(ts_count, 3)):  # Verificar primeiros 3 timestamps
                 try:
-                    elem = elements.nth(i)
-                    if await elem.is_visible():
-                        text = (await elem.inner_text() or "").strip()
+                    timestamp_elem = timestamp_elements.nth(ts_idx)
+                    
+                    if not await timestamp_elem.is_visible():
+                        continue
+                    
+                    # Verificar se é um timestamp válido
+                    ts_text = await timestamp_elem.text_content()
+                    if not ts_text or not _is_valid_timestamp(ts_text.strip()):
+                        continue
+                    
+                    bot_logger.debug(f"🕒 Timestamp encontrado: '{ts_text.strip()}' - buscando autor adjacente...")
+                    
+                    # BUSCAR AUTOR NO MESMO CONTAINER/NIVEL DO TIMESTAMP
+                    # Estratégias de busca a partir do timestamp
+                    author_search_strategies = [
+                        # Mesmo container, buscar span/strong anterior
+                        'xpath=ancestor::*[1]//a[@role="link"]//span[@dir="auto"]',
+                        'xpath=ancestor::*[1]//strong',
+                        'xpath=ancestor::*[1]//span[@dir="auto"]',
                         
-                        if not text:
-                            continue
-
-                        # Limpar texto (remover separadores e timestamps)
-                        clean_name = text.split('·')[0].split('•')[0].strip()
+                        # Container pai, buscar h3 com autor
+                        'xpath=ancestor::*[2]//h3//a[@role="link"]//span[@dir="auto"]',
+                        'xpath=ancestor::*[2]//h3//strong',
                         
-                        # Validar se parece um nome real
-                        if (len(clean_name) >= 3 and 
-                            len(clean_name) <= 80 and
-                            re.search(r'[A-Za-zÀ-ÿ]', clean_name) and
-                            not clean_name.lower() in ['like', 'comment', 'share', 'curtir', 'comentar'] and
-                            not re.match(r'^\d+\s*(min|h|d|hora)', clean_name.lower())):
+                        # Ir para container do header do post
+                        'xpath=ancestor::*[3]//h3//a[@role="link"]//span[@dir="auto"]',
+                        'xpath=ancestor::*[3]//h3//strong',
+                        
+                        # Buscar elementos de autor que precedem o timestamp
+                        'xpath=preceding::a[@role="link"]//span[@dir="auto"][1]',
+                        'xpath=preceding::strong[1]'
+                    ]
+                    
+                    for search_strategy in author_search_strategies:
+                        try:
+                            author_candidates = timestamp_elem.locator(search_strategy)
+                            auth_count = await author_candidates.count()
                             
-                            bot_logger.debug(f"Autor encontrado com estratégia '{strategy}': {clean_name}")
-                            return clean_name
-
+                            for auth_idx in range(min(auth_count, 3)):
+                                try:
+                                    author_elem = author_candidates.nth(auth_idx)
+                                    
+                                    if not await author_elem.is_visible():
+                                        continue
+                                    
+                                    author_text = (await author_elem.inner_text() or "").strip()
+                                    
+                                    if not author_text:
+                                        continue
+                                    
+                                    # Limpar nome (remover separadores)
+                                    clean_name = author_text.split('·')[0].split('•')[0].split('\n')[0].strip()
+                                    
+                                    # Validar se é um nome de pessoa válido
+                                    if await _is_valid_author_name(clean_name, author_elem):
+                                        # Verificar proximidade ao timestamp (deve estar próximo)
+                                        if await _is_author_near_timestamp(author_elem, timestamp_elem):
+                                            bot_logger.success(f"✅ AUTOR ENCONTRADO: '{clean_name}' (próximo ao timestamp: '{ts_text.strip()}')")
+                                            return clean_name
+                                    
+                                except Exception as e:
+                                    bot_logger.debug(f"Erro verificando candidato a autor {auth_idx}: {e}")
+                                    continue
+                        
+                        except Exception as e:
+                            bot_logger.debug(f"Erro na estratégia '{search_strategy}': {e}")
+                            continue
+                    
                 except Exception as e:
-                    bot_logger.debug(f"Erro na estratégia '{strategy}', elemento {i}: {e}")
+                    bot_logger.debug(f"Erro processando timestamp {ts_idx}: {e}")
                     continue
                     
         except Exception as e:
-            bot_logger.debug(f"Erro na estratégia '{strategy}': {e}")
+            bot_logger.debug(f"Erro na busca de timestamp '{ts_selector}': {e}")
             continue
 
-    bot_logger.debug("Nenhum autor encontrado com as estratégias")
+    # FALLBACK: Buscar autor no primeiro h3 visível do post (sem comentários)
+    try:
+        bot_logger.debug("🔍 Fallback: buscando primeiro h3 do post...")
+        
+        first_h3_strategies = [
+            'h3:first-of-type a[role="link"] span[dir="auto"]',
+            'h3:first-of-type strong',
+            'h3:first-of-type span[dir="auto"]:first-child'
+        ]
+        
+        for h3_strategy in first_h3_strategies:
+            try:
+                h3_elements = post.locator(h3_strategy)
+                h3_count = await h3_elements.count()
+                
+                for i in range(min(h3_count, 2)):
+                    try:
+                        h3_elem = h3_elements.nth(i)
+                        
+                        if not await h3_elem.is_visible():
+                            continue
+                        
+                        h3_text = (await h3_elem.inner_text() or "").strip()
+                        clean_name = h3_text.split('·')[0].split('•')[0].split('\n')[0].strip()
+                        
+                        if await _is_valid_author_name(clean_name, h3_elem):
+                            # Verificar se não está em área de comentários
+                            if not await _is_inside_comment_section(h3_elem):
+                                bot_logger.debug(f"✅ Autor encontrado no fallback h3: '{clean_name}'")
+                                return clean_name
+                    
+                    except Exception:
+                        continue
+                        
+            except Exception:
+                continue
+                
+    except Exception as e:
+        bot_logger.debug(f"Erro no fallback h3: {e}")
+
+    bot_logger.warning("❌ AUTOR NÃO ENCONTRADO - nenhuma estratégia funcionou")
     return ""
+
+def _is_valid_timestamp(text: str) -> bool:
+    """Valida se o texto parece um timestamp válido."""
+    if not text:
+        return False
+    
+    text_lower = text.lower()
+    
+    # Padrões de timestamp válidos
+    timestamp_patterns = [
+        r'\d+\s*(min|minuto|minutos|m)(?:$|\s)',
+        r'\d+\s*(h|hora|horas|hr)(?:$|\s)', 
+        r'\d+\s*(d|dia|dias|day|days)(?:$|\s)',
+        r'\d+\s*(s|sec|segundo|segundos)(?:$|\s)',
+        r'há\s+\d+',
+        r'\d+\s*de\s+(janeiro|fevereiro|março|abril|maio|junho)',
+        r'\d{1,2}/\d{1,2}',
+        r'\d{1,2}:\d{2}'
+    ]
+    
+    return any(re.search(pattern, text_lower) for pattern in timestamp_patterns)
+
+async def _is_author_near_timestamp(author_elem: Locator, timestamp_elem: Locator) -> bool:
+    """Verifica se o elemento do autor está próximo do timestamp (mesmo container)."""
+    try:
+        # Verificar se estão no mesmo container pai ou próximos
+        author_box = await author_elem.bounding_box()
+        timestamp_box = await timestamp_elem.bounding_box()
+        
+        if not author_box or not timestamp_box:
+            return False
+        
+        # Calcular distância vertical (devem estar na mesma linha ou próximas)
+        vertical_distance = abs(author_box['y'] - timestamp_box['y'])
+        
+        # Se estão a menos de 50px de distância vertical, considerar próximos
+        return vertical_distance < 50
+        
+    except Exception:
+        return True  # Se não conseguir calcular, assumir que está próximo
+
+async def _is_valid_author_name(name: str, elem: Locator) -> bool:
+    """Valida se o nome extraído é realmente um autor válido."""
+    import re
+    
+    if not name or len(name) < 2:
+        return False
+    
+    # Muito longo para ser nome
+    if len(name) > 100:
+        return False
+    
+    # Contém apenas letras, espaços, hífens e acentos
+    if not re.match(r'^[A-Za-zÀ-ÿ\s\-\.\']+$', name):
+        return False
+    
+    # Não pode ser termo de UI (mais rigoroso)
+    ui_terms = [
+        'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar',
+        'responder', 'reply', 'ver mais', 'see more', 'seguir', 'follow',
+        'há', 'ago', 'min', 'hora', 'day', 'yesterday', 'ontem', 'h', 'd',
+        'curtida', 'curtidas', 'reagir', 'react', 'reaction', 'reação',
+        'photofix', 'studio'  # Filtrar nomes de empresa/página quando aparecem como comentário
+    ]
+    
+    name_lower = name.lower()
+    
+    # Verificar se contém termos de UI
+    if any(term in name_lower for term in ui_terms):
+        return False
+    
+    # Não pode ser timestamp
+    if re.match(r'^\d+\s*(min|h|d|hora|horas|dia|dias)', name_lower):
+        return False
+    
+    # Não pode ser apenas números ou símbolos
+    if re.match(r'^[\d\s\-\·\•]+$', name):
+        return False
+    
+    # Deve ter pelo menos uma letra
+    if not re.search(r'[A-Za-zÀ-ÿ]', name):
+        return False
+    
+    # Verificar se não é termo isolado suspeito
+    words = name_lower.split()
+    suspicious_single_words = ['sure', 'ok', 'yes', 'no', 'sim', 'não']
+    if len(words) == 1 and words[0] in suspicious_single_words:
+        return False
+    
+    # Deve ter pelo menos 3 caracteres alfabéticos
+    alpha_count = sum(1 for c in name if c.isalpha())
+    if alpha_count < 3:
+        return False
+    
+    return True
+
+async def _is_inside_comment_section(elem: Locator) -> bool:
+    """Verifica se o elemento está dentro de uma seção de comentários."""
+    try:
+        # Verificar URL do elemento ou ancestrais (comentários têm comment_id na URL)
+        try:
+            # Buscar links com comment_id na árvore de ancestrais
+            comment_links = elem.locator('xpath=ancestor-or-self::*//a[contains(@href, "comment_id")]')
+            if await comment_links.count() > 0:
+                bot_logger.debug("❌ Elemento rejeitado: contém link de comentário")
+                return True
+        except Exception:
+            pass
+        
+        # Verificar se está dentro de elementos típicos de comentários
+        comment_indicators = [
+            '[role="article"] [role="article"]',  # Post dentro de post (comentário)
+            '[data-testid*="comment"]',
+            '[aria-label*="comment"]', 
+            '[aria-label*="comentário"]'
+        ]
+        
+        for indicator in comment_indicators:
+            try:
+                ancestor_check = elem.locator(f'xpath=ancestor::{indicator}')
+                if await ancestor_check.count() > 0:
+                    bot_logger.debug(f"❌ Elemento rejeitado: dentro de {indicator}")
+                    return True
+            except Exception:
+                continue
+        
+        # Verificar distância do topo do post (comentários estão mais abaixo)
+        try:
+            post_container = elem.locator('xpath=ancestor::div[@role="article"]')
+            if await post_container.count() > 0:
+                post_box = await post_container.first().bounding_box()
+                elem_box = await elem.bounding_box()
+                
+                if post_box and elem_box:
+                    # Se o elemento está muito abaixo do início do post, pode ser comentário
+                    distance_from_top = elem_box['y'] - post_box['y']
+                    if distance_from_top > 300:  # Mais de 300px do topo do post
+                        bot_logger.debug(f"❌ Elemento rejeitado: muito abaixo do topo do post ({distance_from_top}px)")
+                        return True
+        except Exception:
+            pass
+        
+        # Verificar se o texto ao redor contém muitos indicadores de comentário
+        try:
+            context_text = await elem.locator('xpath=ancestor::*[3]').text_content()
+            if context_text:
+                comment_phrases = ['curtir', 'comentar', 'responder', 'like', 'reply', 'respond', 'compartilhar', 'share']
+                phrase_count = sum(1 for phrase in comment_phrases if phrase in context_text.lower())
+                
+                # Se há muitas palavras de ação, provavelmente é área de comentário
+                if phrase_count >= 3:
+                    bot_logger.debug(f"❌ Elemento rejeitado: contexto com muitas ações de comentário ({phrase_count})")
+                    return True
+        except Exception:
+            pass
+        
+        return False
+        
+    except Exception:
+        return False
 
 async def _extract_text(post: Locator) -> str:
     """Extrai texto do post usando inner_text e filtragem melhorada."""

@@ -149,26 +149,28 @@ POST_SELECTORS = [
     'div:has(img[src*="scontent"]):has(strong)'
 ]
 
-# Estratégias para extração de autor - MELHORADAS para capturar nomes reais
+# Estratégias para extração de autor - FOCADO NO HEADER DO POST
 AUTHOR_STRATEGIES = [
-    # Links de perfil com texto do nome
-    'h3 a[role="link"] span[dir="auto"]',
-    'h3 a[role="link"] strong',
-    'h3 strong a[role="link"]',
-    'h3 span[dir="auto"] a[role="link"]',
-    # Links diretos com href de perfil
-    'a[href*="/profile.php"] span[dir="auto"]:not([aria-hidden="true"])',
-    'a[href*="/user/"] span[dir="auto"]:not([aria-hidden="true"])',
-    'a[href*="facebook.com/"] span[dir="auto"]:not([aria-hidden="true"])',
-    # Estruturas mais genéricas mas comuns
-    'strong a span[dir="auto"]',
-    'span[dir="auto"] strong a',
-    # Fallback para nomes em elementos strong
-    'h3 strong:not(:has(a))',
-    'strong:not(:near(time)):not(:has-text("min")):not(:has-text("h")):not(:has-text("d"))',
-    # Seletores específicos para layout atual do Facebook
-    'div[role="article"] h3 span[dir="auto"]:first-child',
-    'div[role="article"] strong:first-of-type'
+    # HEADER PRINCIPAL - onde fica o autor verdadeiro
+    'header h3 a[role="link"] span[dir="auto"]',
+    'header h3 strong',
+    'header h3 span[dir="auto"]:first-child',
+    
+    # PRIMEIRO DIV DO ARTIGO - cabeçalho do post
+    'div[role="article"] > div:first-child h3 a[role="link"] span[dir="auto"]',
+    'div[role="article"] > div:first-child h3 strong',
+    'div[role="article"] > div:first-child h3 span[dir="auto"]',
+    
+    # H3 que é o PRIMEIRO no post (não de comentários)
+    'div[role="article"] h3:first-of-type a[role="link"] span[dir="auto"]',
+    'div[role="article"] h3:first-of-type strong',
+    'div[role="article"] h3:first-of-type span[dir="auto"]',
+    
+    # PRÓXIMO AO TIMESTAMP - indicador de que é header
+    'h3:near(time) a[role="link"] span[dir="auto"]',
+    'h3:near([datetime]) a[role="link"] span[dir="auto"]',
+    'h3:near([aria-label*="há"]) a[role="link"] span[dir="auto"]',
+    'h3:near([aria-label*="ago"]) a[role="link"] span[dir="auto"]'
 ]
 
 # Estratégias para extração de texto
