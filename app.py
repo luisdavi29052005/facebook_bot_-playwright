@@ -1,4 +1,3 @@
-
 from flask import Flask, render_template, jsonify, request
 import json
 import os
@@ -220,7 +219,7 @@ def save_config():
                 for key, value in env_content.items():
                     tmp_file.write(f'{key}={value}\n')
                 tmp_file.flush()
-                
+
                 # Renomear para .env (operação atômica)
                 os.replace(tmp_file.name, '.env')
 
@@ -228,7 +227,7 @@ def save_config():
             global _config_cache
             _config_cache = None
             new_config = get_config(force_reload=True)
-            
+
             # Recarregar módulo de config
             if 'fb_bot.config' in sys.modules:
                 importlib.reload(sys.modules['fb_bot.config'])
@@ -286,7 +285,7 @@ def stop_bot():
     stop_event.set()
     bot_running = False
     bot_stats['start_time'] = None
-    
+
     # Fazer join com timeout se thread existe
     if bot_thread and bot_thread.is_alive():
         bot_thread.join(timeout=30)
@@ -311,21 +310,20 @@ def test_webhook():
         if not webhook_url:
             return jsonify({'success': False, 'message': 'URL obrigatória'})
 
-        # Run async test in thread
+        # Executar healthcheck assíncrono
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
         try:
             from fb_bot.n8n_client import healthcheck_n8n
-            result = loop.run_until_complete(healthcheck_n8n(webhook_url))
-            
-            if result:
-                return jsonify({'success': True, 'message': 'Webhook funcionando'})
-            else:
-                return jsonify({'success': False, 'message': 'Webhook não acessível'})
+            is_healthy = loop.run_until_complete(healthcheck_n8n(webhook_url))
         finally:
             loop.close()
-            
+
+        if is_healthy:
+            return jsonify({'success': True, 'message': 'Webhook funcionando'})
+        else:
+            return jsonify({'success': False, 'message': 'Webhook não acessível'})
+
     except Exception as e:
         return jsonify({'success': False, 'message': f'Erro: {str(e)}'})
 

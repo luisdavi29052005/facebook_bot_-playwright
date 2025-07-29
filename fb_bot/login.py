@@ -1,4 +1,3 @@
-
 import json
 import asyncio
 from pathlib import Path
@@ -21,13 +20,13 @@ class PlaywrightFBLogin:
 
     async def __aenter__(self):
         self.playwright = await async_playwright().start()
-        
+
         # Criar diretório de sessão se não existir
         session_path = Path(SESSION_DIR)
         session_path.mkdir(parents=True, exist_ok=True)
-        
+
         logging.info(f"📁 Usando diretório de sessão persistente: {SESSION_DIR}")
-        
+
         # Configuração robusta do contexto
         context_options = {
             'user_data_dir': SESSION_DIR,
@@ -53,18 +52,18 @@ class PlaywrightFBLogin:
                 '--disable-features=VizDisplayCompositor'
             ]
         }
-        
+
         # Para launch_persistent_context, o storage_state é carregado automaticamente
         # através do user_data_dir, então não precisamos especificar separadamente
         storage_state_path = Path(STORAGE_STATE_FILE)
         if storage_state_path.exists():
             logging.info("🗂️ Storage state será carregado automaticamente via user_data_dir")
-        
+
         self.context = await self.playwright.chromium.launch_persistent_context(**context_options)
-        
+
         # Aguardar contexto carregar
         await asyncio.sleep(2)
-        
+
         # Obter página existente ou criar nova
         pages = self.context.pages
         if pages:
@@ -73,10 +72,10 @@ class PlaywrightFBLogin:
         else:
             self.page = await self.context.new_page()
             logging.info("📄 Criando nova página no contexto persistente")
-        
+
         # Configurar interceptadores de requisição para melhor performance
         await self.page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", lambda route: route.abort())
-        
+
         # Garantir login válido
         if await self.ensure_logged_in():
             return self
@@ -98,32 +97,45 @@ class PlaywrightFBLogin:
         """Garante que o usuário está logado com múltiplas estratégias."""
         try:
             logging.info("🔍 Verificando status de login...")
-            
+
             # Navegar para Facebook com retry
             if not await self._navigate_to_facebook():
                 return False
+
+            # Verificar se já está logado via URL primeiro (mais rápido)
+            current_url = self.page.url.lower()
+            if ('/home.php' in current_url or 
+                '/groups/' in current_url or 
+                (current_url.endswith('facebook.com/') and 'login' not in current_url)):
+                logging.info("✅ Login verificado via URL")
+                # Fazer verificação adicional mais simples
+                email_form = await self.page.query_selector("input[name='email']")
+                if not email_form:
+                    logging.info("✅ Login confirmado - sem formulário de login")
+                    await self._save_storage_state()
+                    return True
             
-            # Verificar se já está logado
+            # Verificar se já está logado via elementos da página
             if await self._check_login_status():
                 logging.info("✅ Já logado via sessão persistente")
                 await self._save_storage_state()
                 return True
-            
+
             # Tentar login com cookies se disponíveis
             if await self._try_cookie_login():
                 logging.info("✅ Login com cookies bem-sucedido")
                 await self._save_storage_state()
                 return True
-            
+
             # Fallback para login manual
             logging.info("🔐 Necessário login manual...")
             if await self._perform_manual_login():
                 logging.info("✅ Login manual concluído")
                 await self._save_storage_state()
                 return True
-            
+
             return False
-            
+
         except Exception as e:
             logging.error(f"❌ Erro no processo de login: {e}")
             return False
@@ -133,65 +145,96 @@ class PlaywrightFBLogin:
         for attempt in range(retries):
             try:
                 logging.info(f"🌐 Navegando para Facebook (tentativa {attempt + 1}/{retries})")
-                
+
                 response = await self.page.goto(
                     FB_URL, 
                     wait_until='domcontentloaded',
                     timeout=30000
                 )
-                
+
                 if response and response.status < 400:
                     await asyncio.sleep(3)  # Aguardar carregamento adicional
                     return True
-                    
+
             except Exception as e:
                 logging.warning(f"⚠️ Tentativa {attempt + 1} falhou: {e}")
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
-                    
+
         logging.error("❌ Falha ao navegar para Facebook após múltiplas tentativas")
         return False
 
-    async def _check_login_status(self):
-        """Verifica se está logado com múltiplos indicadores."""
+    async def _check_login_status(self) -> bool:
+        """Verifica se o usuário está logado com validação mais rigorosa."""
         try:
-            # Múltiplas verificações de login
-            login_checks = [
-                # Verificar ausência de formulário de login
-                ("input[name='email']", False, "Formulário de login ausente"),
-                # Verificar presença de navegação
-                ("div[role='navigation']", True, "Navegação principal presente"),
-                # Verificar feed ou home
-                ("div[role='feed'], a[aria-label*='Home'], a[aria-label*='Início']", True, "Feed ou link Home presente"),
-                # Verificar perfil/menu
-                ("div[data-testid='left_nav_menu_list']", True, "Menu lateral presente")
-            ]
+            # Verificar ausência do formulário de login
+            email_form = await self.page.query_selector("input[name='email']")
             
-            for selector, should_exist, description in login_checks:
-                try:
-                    element = await self.page.wait_for_selector(selector, timeout=5000)
-                    exists = element is not None
-                    
-                    if (should_exist and exists) or (not should_exist and not exists):
-                        logging.info(f"✅ Login verificado: {description}")
-                        return True
-                        
-                except Exception:
-                    continue
+            # Se há formulário de login, definitivamente não está logado
+            if email_form:
+                logging.info("❌ Formulário de login detectado - não logado")
+                return False
+
+            # Verificar URL atual para determinar contexto
+            current_url = self.page.url.lower()
             
-            # Verificação adicional por URL
-            current_url = self.page.url
-            if ('facebook.com' in current_url and 
-                not any(pattern in current_url for pattern in ['login', 'recover', 'checkpoint', 'help'])):
-                logging.info("✅ Login verificado via URL")
-                return True
+            # Se está na home page, usar verificações específicas
+            if '/home.php' in current_url or current_url.endswith('facebook.com/'):
+                # Na home, verificar elementos específicos da timeline
+                home_indicators = [
+                    "div[role='main']",  # Container principal
+                    "div[role='navigation']",  # Navegação superior
+                    "div[data-pagelet='Feed']",  # Feed da timeline
+                    "div[aria-label*='Facebook']",  # Logo do Facebook
+                    "[data-testid='royal_login_form']"  # Este NÃO deve existir se logado
+                ]
                 
-            return False
+                # Verificar se NÃO há formulário de login
+                login_form = await self.page.query_selector("[data-testid='royal_login_form']")
+                if login_form:
+                    logging.info("❌ Formulário real de login detectado na home")
+                    return False
+                
+                # Verificar se há pelo menos um indicador de home logada
+                for indicator in home_indicators[:4]:  # Excluir o último que é negativo
+                    try:
+                        element = await self.page.query_selector(indicator)
+                        if element:
+                            logging.info(f"✅ Login confirmado via elemento home: {indicator}")
+                            return True
+                    except Exception:
+                        continue
+                        
+                # Se chegou aqui, assumir que está logado na home (pode estar carregando)
+                logging.info("✅ Login assumido - página home sem formulário de login")
+                return True
             
+            # Se está em outras páginas (grupos, perfil, etc)
+            else:
+                # Verificar presença de elementos de navegação
+                navigation = await self.page.query_selector("div[role='navigation']")
+                left_menu = await self.page.query_selector("div[data-testid='left_nav_menu_list']")
+                main_content = await self.page.query_selector("div[role='main']")
+                
+                # Considera logado se há navegação OU conteúdo principal
+                is_logged_in = navigation or left_menu or main_content
+                
+                if is_logged_in:
+                    logging.info("✅ Login confirmado - elementos de navegação disponíveis")
+                else:
+                    logging.warning("❌ Elementos de login não encontrados")
+                
+                return is_logged_in
+
         except Exception as e:
-            logging.warning(f"⚠️ Erro na verificação de login: {e}")
-            return False
+            logging.error(f"Erro ao verificar status de login: {e}")
+            # Em caso de erro, verificar se pelo menos não há formulário de login
+            try:
+                email_form = await self.page.query_selector("input[name='email']")
+                return not email_form
+            except Exception:
+                return False
 
     async def _try_cookie_login(self):
         """Tenta login com cookies salvos."""
@@ -199,19 +242,19 @@ class PlaywrightFBLogin:
             cookies = self._load_cookies()
             if not cookies:
                 return False
-                
+
             logging.info("🍪 Tentando login automático com cookies...")
-            
+
             # Aplicar cookies
             await self.context.add_cookies(cookies)
-            
+
             # Recarregar página para ativar cookies
             await self.page.reload(wait_until='domcontentloaded', timeout=30000)
             await asyncio.sleep(5)
-            
+
             # Verificar se funcionou
             return await self._check_login_status()
-            
+
         except Exception as e:
             logging.warning(f"⚠️ Erro no login com cookies: {e}")
             return False
@@ -221,10 +264,10 @@ class PlaywrightFBLogin:
         try:
             if not Path(COOKIES_FILE).exists():
                 return None
-                
+
             with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
                 cookies_data = json.load(f)
-                
+
             # Normalizar formato de cookies
             if isinstance(cookies_data, dict):
                 cookies = cookies_data.get('all') or cookies_data.get('essential') or cookies_data
@@ -232,10 +275,10 @@ class PlaywrightFBLogin:
                 cookies = cookies_data
             else:
                 return None
-                
+
             logging.info(f"🍪 Carregados {len(cookies)} cookies")
             return cookies
-            
+
         except Exception as e:
             logging.error(f"❌ Erro ao carregar cookies: {e}")
             return None
@@ -247,37 +290,37 @@ class PlaywrightFBLogin:
             if 'login' not in self.page.url:
                 await self.page.goto("https://web.facebook.com/login", wait_until='domcontentloaded', timeout=30000)
                 await asyncio.sleep(3)
-            
+
             logging.warning("🔐 ATENÇÃO: Login manual necessário!")
             logging.info("👆 Faça login no navegador aberto")
             logging.info("📱 Use suas credenciais normais")
             logging.info("⏳ Aguardando login... (timeout: 15 minutos)")
-            
+
             # Aguardar login com verificação periódica
             for i in range(900):  # 15 minutos
                 if i % 60 == 0 and i > 0:
                     minutes = i // 60
                     logging.info(f"⏳ {minutes} minuto(s) aguardando...")
-                
+
                 # Verificar login
                 if await self._check_login_status():
                     logging.info("✅ Login manual detectado!")
-                    
+
                     # Tratar consentimentos/popups
                     await self._handle_consent_popups()
-                    
+
                     return True
-                
+
                 # Verificar se precisa tratar checkpoint/2FA
                 if await self._check_checkpoint():
                     logging.error("❌ Checkpoint/2FA detectado - resolva manualmente")
                     continue
-                    
+
                 await asyncio.sleep(1)
-            
+
             logging.error("❌ Timeout no login manual")
             return False
-            
+
         except Exception as e:
             logging.error(f"❌ Erro no login manual: {e}")
             return False
@@ -290,23 +333,23 @@ class PlaywrightFBLogin:
                 ("button:has-text('Accept All')", "Accept All"),
                 ("button:has-text('Aceitar todos')", "Aceitar todos"),
                 ("button:has-text('Allow all cookies')", "Allow all cookies"),
-                
+
                 # Save browser/device
                 ("button:has-text('Save Browser')", "Save Browser"),
                 ("button:has-text('Salvar navegador')", "Salvar navegador"),
                 ("button:has-text('Not now')", "Not now"),
                 ("button:has-text('Agora não')", "Agora não"),
-                
+
                 # Notifications
                 ("button:has-text('Turn on')", "Turn on notifications"),
                 ("button:has-text('Ativar')", "Ativar notificações"),
                 ("button:has-text('No thanks')", "No thanks"),
                 ("button:has-text('Não, obrigado')", "Não, obrigado"),
-                
+
                 # Generic dismiss
                 ("button[aria-label='Close'], button[aria-label='Fechar']", "Close/Fechar")
             ]
-            
+
             for selector, description in popups_to_handle:
                 try:
                     element = await self.page.wait_for_selector(selector, timeout=3000)
@@ -316,25 +359,55 @@ class PlaywrightFBLogin:
                         await asyncio.sleep(2)
                 except Exception:
                     continue
-                    
+
         except Exception as e:
             logging.debug(f"Erro ao tratar popups: {e}")
 
     async def _check_checkpoint(self):
         """Verifica se está em checkpoint/2FA."""
         try:
-            checkpoint_indicators = [
-                "checkpoint",
-                "two-factor",
-                "security check",
-                "verificação de segurança"
+            current_url = self.page.url.lower()
+            
+            # Verificações específicas de URL (mais confiáveis)
+            url_checkpoint_indicators = [
+                "/checkpoint/",
+                "/2fa/",
+                "/security/",
+                "checkpoint.php",
+                "two_factor"
             ]
             
-            current_url = self.page.url.lower()
-            page_text = (await self.page.text_content('body')).lower() if await self.page.locator('body').count() > 0 else ""
+            # Se a URL contém indicadores específicos, é checkpoint
+            if any(indicator in current_url for indicator in url_checkpoint_indicators):
+                return True
             
-            return any(indicator in current_url or indicator in page_text for indicator in checkpoint_indicators)
+            # Se está na home ou em grupos, provavelmente não é checkpoint
+            if ('/home.php' in current_url or 
+                '/groups/' in current_url or 
+                current_url.endswith('facebook.com/')):
+                return False
             
+            # Verificação adicional por elementos da página (apenas se URL não for conclusiva)
+            try:
+                # Procurar por elementos específicos de checkpoint
+                checkpoint_elements = [
+                    "[data-testid='checkpoint_title']",
+                    "div:has-text('Security Check')",
+                    "div:has-text('Verificação de Segurança')",
+                    "div:has-text('Two-Factor Authentication')",
+                    "div:has-text('Autenticação de dois fatores')"
+                ]
+                
+                for selector in checkpoint_elements:
+                    element = await self.page.query_selector(selector)
+                    if element and await element.is_visible():
+                        return True
+                        
+            except Exception:
+                pass
+            
+            return False
+
         except Exception:
             return False
 
@@ -343,10 +416,10 @@ class PlaywrightFBLogin:
         try:
             storage_state_path = Path(STORAGE_STATE_FILE)
             storage_state_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             await self.context.storage_state(path=str(storage_state_path))
             logging.info("💾 Storage state salvo")
-            
+
         except Exception as e:
             logging.warning(f"⚠️ Erro ao salvar storage state: {e}")
 
@@ -358,9 +431,9 @@ class PlaywrightFBLogin:
                 logging.warning("⚠️ Sessão perdida, re-estabelecendo login...")
                 if not await self.ensure_logged_in():
                     raise Exception("Falha ao re-estabelecer login")
-            
+
             logging.info(f"🌍 Navegando para grupo: {group_url}")
-            
+
             # Navegar com retry
             for attempt in range(3):
                 try:
@@ -369,10 +442,10 @@ class PlaywrightFBLogin:
                         wait_until='domcontentloaded',
                         timeout=30000
                     )
-                    
+
                     if response and response.status < 400:
                         break
-                        
+
                 except Exception as e:
                     logging.warning(f"⚠️ Tentativa {attempt + 1} falhou: {e}")
                     if attempt < 2:
@@ -380,7 +453,7 @@ class PlaywrightFBLogin:
                         continue
                     else:
                         raise
-            
+
             # Aguardar feed carregar com timeout aumentado
             try:
                 await self.page.wait_for_selector("div[role='feed']", timeout=30000)
@@ -394,7 +467,7 @@ class PlaywrightFBLogin:
                     logging.info("✅ Conteúdo do grupo detectado")
                 except Exception:
                     logging.error("❌ Timeout no carregamento do grupo")
-                    
+
         except Exception as e:
             logging.error(f"❌ Erro ao navegar para grupo: {e}")
             raise

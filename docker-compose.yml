@@ -1,0 +1,13 @@
+version: "3"
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+      # Você pode adicionar variáveis de ambiente personalizadas aqui
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+    restart: unless-stopped

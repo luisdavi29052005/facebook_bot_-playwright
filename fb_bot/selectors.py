@@ -127,22 +127,48 @@ Centralizados para facilitar manutenção quando o Facebook muda a interface.
 FEED = "div[role='feed']"
 ARTICLE = "div[role='article'], article[role='article']"
 
-# Seletores para diferentes tipos de posts
+# Seletores para diferentes tipos de posts - FOCANDO NA ÁREA REAL DE POSTS
 POST_SELECTORS = [
+    # Seletores mais amplos para capturar posts reais
+    'div[role="article"]',
+    'article[role="article"]', 
     'div[data-pagelet^="FeedUnit_"]',
-    'div[role="article"]', 
-    'article[role="article"]',
-    'div[class*="x1yztbdb"]',  # Classe comum de posts
-    'div:has(time[datetime])'   # Posts com timestamp
+    # Containers de post baseados em estrutura comum
+    'div:has(> div > div > div > div > div h3)',  # Posts com cabeçalho h3
+    'div:has(span[dir="auto"]:has(strong))',     # Posts com nome do autor
+    # Posts que têm botões de curtir/comentar
+    'div:has(div[role="button"]:has-text("Curtir"))',
+    'div:has(div[role="button"]:has-text("Like"))',
+    # Estrutura típica de posts do Facebook
+    'div[class*="x1yztbdb"]',
+    'div[class*="story_body_container"]',
+    # Posts com timestamp visível
+    'div:has(time)',
+    'div:has(a[href*="story_fbid"])',
+    # Fallback mais geral
+    'div:has(img[src*="scontent"]):has(strong)'
 ]
 
-# Estratégias para extração de autor
+# Estratégias para extração de autor - MELHORADAS para capturar nomes reais
 AUTHOR_STRATEGIES = [
-    'a[href*="facebook.com"] span[dir="auto"]:not([aria-hidden="true"])',
-    'a[href*="/user/"] span[dir="auto"]:not([aria-hidden="true"])',
-    'a[href*="/profile.php"] span[dir="auto"]:not([aria-hidden="true"])',
+    # Links de perfil com texto do nome
     'h3 a[role="link"] span[dir="auto"]',
-    'strong a[role="link"] span[dir="auto"]'
+    'h3 a[role="link"] strong',
+    'h3 strong a[role="link"]',
+    'h3 span[dir="auto"] a[role="link"]',
+    # Links diretos com href de perfil
+    'a[href*="/profile.php"] span[dir="auto"]:not([aria-hidden="true"])',
+    'a[href*="/user/"] span[dir="auto"]:not([aria-hidden="true"])',
+    'a[href*="facebook.com/"] span[dir="auto"]:not([aria-hidden="true"])',
+    # Estruturas mais genéricas mas comuns
+    'strong a span[dir="auto"]',
+    'span[dir="auto"] strong a',
+    # Fallback para nomes em elementos strong
+    'h3 strong:not(:has(a))',
+    'strong:not(:near(time)):not(:has-text("min")):not(:has-text("h")):not(:has-text("d"))',
+    # Seletores específicos para layout atual do Facebook
+    'div[role="article"] h3 span[dir="auto"]:first-child',
+    'div[role="article"] strong:first-of-type'
 ]
 
 # Estratégias para extração de texto

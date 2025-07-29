@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from pathlib import Path
@@ -9,7 +8,7 @@ from logger import setup_logging, bot_logger
 from state_manager import StateManager
 from fb_bot.config import config
 from fb_bot.login import fb_login
-from fb_bot.monitor import extract_post_id, extract_post_details, iterate_posts
+from fb_bot.monitor import navigate_to_group, find_next_valid_post, extract_post_id, extract_post_details
 from fb_bot.commenter import open_comment_box, send_comment
 from fb_bot.n8n_client import ask_n8n, healthcheck_n8n
 
@@ -29,7 +28,7 @@ class PostProcessor:
         # Check stop event
         if stop_event.is_set():
             return False
-            
+
         # Extrair ID
         post_id = await extract_post_id(post_element)
         if not post_id:
@@ -85,16 +84,16 @@ class PostProcessor:
                 details = await extract_post_details(post_element)
                 if details and (details.get('text') or details.get('image_url') or details.get('has_video')):
                     return details
-                    
+
                 if attempt < max_retries:
                     bot_logger.debug(f"Tentativa {attempt + 1} falhou, aguardando...")
                     await asyncio.sleep(2)
-                    
+
             except Exception as e:
                 bot_logger.error(f"Erro na extração tentativa {attempt + 1}: {e}")
                 if attempt < max_retries:
                     await asyncio.sleep(2)
-                    
+
         return None
 
     def _is_valid_post(self, details: dict) -> bool:
@@ -141,18 +140,18 @@ class PostProcessor:
         }
 
         bot_logger.info("Enviando para IA...")
-        
+
         # Retry com backoff exponencial
         max_retries = 3
         base_delay = 1
-        
+
         for attempt in range(max_retries):
             try:
                 reply = await ask_n8n(config.n8n_webhook_url, payload)
                 if reply:
                     bot_logger.info(f"IA respondeu: {reply[:50]}...")
                     return reply
-                    
+
             except Exception as e:
                 bot_logger.error(f"Erro na tentativa {attempt + 1}: {e}")
                 if attempt < max_retries - 1:
@@ -213,38 +212,38 @@ async def main_loop():
         while not stop_event.is_set():
             try:
                 bot_logger.info("Iniciando novo ciclo...")
-                
+
                 # Verificar se página/contexto ainda estão ativos
                 try:
                     if page.is_closed():
                         raise Exception("Página foi fechada")
-                        
+
                     if not login_manager.context.pages:
                         raise Exception("Contexto sem páginas")
-                        
+
                     # Teste simples para verificar se página responde
                     await page.evaluate("() => document.title")
-                    
+
                 except Exception as e:
                     bot_logger.error(f"Sessão perdida: {e}")
                     bot_logger.info("Recriando sessão de login...")
-                    
+
                     # Limpar sessão anterior
                     try:
                         await login_manager.__aexit__(None, None, None)
                     except Exception:
                         pass
-                    
+
                     # Criar nova sessão
                     login_manager = await fb_login(headless=config.headless)
                     if not login_manager:
                         bot_logger.error("Falha ao recriar sessão")
                         break
-                        
+
                     page = login_manager.get_page()
                     bot_logger.info("Sessão recriada com sucesso")
                     await asyncio.sleep(3)
-                
+
                 # Navegar para grupo
                 try:
                     await login_manager.navigate_to_group(config.facebook_group_url)
@@ -252,42 +251,71 @@ async def main_loop():
                     bot_logger.error(f"Erro ao navegar para grupo: {e}")
                     continue
 
-                # Processar posts
+                # NOVO FLUXO SEQUENCIAL: processar UM post por vez
                 posts_found = 0
                 leads_found = 0
 
-                bot_logger.debug("Iniciando processamento de posts...")
-                
-                # Usar max_posts_per_cycle da config
-                async for post_element in iterate_posts(page, max_posts=config.max_posts_per_cycle):
+                bot_logger.debug("🔄 Iniciando processamento sequencial de posts...")
+
+                # Loop para processar posts até o limite por ciclo
+                for post_number in range(config.max_posts_per_cycle):
                     if stop_event.is_set():
                         bot_logger.info("Stop event detectado, parando processamento")
                         break
-                        
+
                     try:
                         if page.is_closed():
-                            bot_logger.warning("Página fechada durante iteração - interrompendo")
+                            bot_logger.warning("Página fechada durante processamento - interrompendo")
                             break
-                        
+
+                        # PASSO 1: Encontrar próximo post válido
+                        bot_logger.debug(f"🔍 Buscando post #{post_number + 1}...")
+                        post_element = await find_next_valid_post(page)
+
+                        if not post_element:
+                            bot_logger.warning(f"❌ Nenhum post válido encontrado para #{post_number + 1}")
+                            # Rolar mais e tentar novamente
+                            try:
+                                await page.mouse.wheel(0, 1500)
+                                await asyncio.sleep(3)
+                                post_element = await find_next_valid_post(page)
+
+                                if not post_element:
+                                    bot_logger.warning("❌ Nenhum post encontrado após scroll adicional")
+                                    break
+                            except Exception as e:
+                                bot_logger.warning(f"Erro ao rolar página: {e}")
+                                break
+
                         posts_found += 1
+                        bot_logger.info(f"✅ Post #{post_number + 1} encontrado - iniciando processamento")
+
+                        # PASSO 2: Processar o post (extrair → enviar para n8n → comentar)
                         success = await processor.process_post(post_element, page)
 
                         if success:
                             leads_found += 1
-                            bot_logger.debug("Pausa após comentário bem-sucedido")
+                            bot_logger.info(f"🎯 LEAD #{leads_found} processado com sucesso!")
+
+                            # Pausa maior após comentário bem-sucedido
+                            bot_logger.debug("⏸️ Pausa pós-comentário (15s)")
                             await asyncio.sleep(15)
                         else:
+                            bot_logger.debug("⏸️ Post processado sem comentário (3s)")
                             await asyncio.sleep(3)
-                            
-                        # Verificação adicional de integridade da página
+
+                        # Verificação de integridade da página
                         try:
                             await page.evaluate("() => window.location.href")
                         except Exception:
-                            bot_logger.warning("Página não responde - interrompendo iteração")
+                            bot_logger.warning("❌ Página não responde - interrompendo ciclo")
                             break
 
+                        bot_logger.debug(f"✅ Post #{post_number + 1} concluído - avançando para próximo")
+
                     except Exception as e:
-                        bot_logger.error(f"Erro processando post: {e}")
+                        bot_logger.error(f"❌ Erro processando post #{post_number + 1}: {e}")
+                        # Continuar para próximo post mesmo com erro
                         continue
 
                 # Controle de ciclos vazios
