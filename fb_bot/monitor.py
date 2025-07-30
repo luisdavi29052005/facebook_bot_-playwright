@@ -1,6 +1,9 @@
 import re
 import asyncio
 import logging
+import hashlib
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 from playwright.async_api import Page, Locator
@@ -1361,7 +1364,32 @@ async def _extract_images(post: Locator):
         bot_logger.debug(f"Imagens extraídas: {len(unique_images)}")
         return unique_images
 
+
+async def has_video(post: Locator) -> bool:
+    """Verifica se o post contém vídeo."""
+    try:
+        # Verificar elementos de vídeo
+        video_selectors = [
+            'video',
+            '[data-video-id]',
+            '[aria-label*="video" i]',
+            '[aria-label*="vídeo" i]',
+            'div[role="button"][aria-label*="play" i]'
+        ]
+        
+        for selector in video_selectors:
+            try:
+                video_elements = post.locator(selector)
+                if await video_elements.count() > 0:
+                    return True
+            except Exception:
+                continue
+        
+        return False
+    except Exception:
+        return False
+
+
     except Exception as e:
         bot_logger.debug(f"Erro na extração de imagens: {e}")
         return []
-</replit_final_file>
