@@ -1,258 +1,138 @@
-
-import asyncio
-import re
-from playwright.async_api import Locator
-
-# Seletores principais
-ARTICLE = "div[role='article']"
-FEED = "div[role='feed']"
-
-# Regex para botões "Ver mais"
-SEE_MORE_REGEX = r'(See more|Ver mais|Mostrar mais|Ver más|Voir plus)'
-
-# Candidatos para mensagens do post
-MESSAGE_CANDIDATES = [
-    "[data-ad-preview='message'] div[dir='auto']",
-    "[data-ad-comet-preview='message'] div[dir='auto']",
-    "div[dir='auto']"
-]
-
-# Candidatos para imagens
-IMG_CANDIDATE = "img[src*='scontent'], img[srcset*='scontent']"
-
-# Seletores para posts válidos
-POST_SELECTORS = [
-    f"{FEED} {ARTICLE}",
-    f"{FEED} div[class*='x1yztbdb']",
-    "div[class*='userContentWrapper']",
-    "div[data-testid*='story-subtitle'] >> xpath=ancestor::div[contains(@class, 'story_body_container')]",
-    "div[class*='story_body_container']"
-]
-
-# Seletores para autor
-AUTHOR_STRATEGIES = [
-    [
-        "h3 a[href*='facebook.com/'] strong",
-        "h3 a[href*='/user/'] strong", 
-        "h3 a[href*='/profile/'] strong",
-        "h3 a[role='link'] strong:not(:has-text('·')):not(:has-text('min')):not(:has-text('h')):not(:has-text('d'))",
-    ],
-    [
-        "h3 span[dir='auto']:not(:has-text('·')):not(:has-text('min')):not(:has-text('h')):not(:has-text('d')):not(:has-text('ago'))",
-        "h3 span[class*='x1lliihq']:not(:has-text('·')):not(:has-text('min')):not(:has-text('h')):not(:has-text('d'))",
-    ],
-    [
-        "h3 strong:not(:near(time)):not(:has-text('min')):not(:has-text('h')):not(:has-text('d')):not(:has-text('ago'))",
-        "h3 span strong:not(:has-text('·')):not(:has-text('min'))",
-    ]
-]
-
-# Seletores para texto do post
-TEXT_STRATEGIES = [
-    [
-        "div[data-ad-preview='message']",
-        "div[data-testid*='post_message']", 
-        "div[class*='userContent']",
-        "div[class*='text_exposed_root']",
-    ],
-    [
-        "div[dir='auto']:not(:near(h3)):not(:near(time)) span[dir='auto']",
-        "span[dir='auto']:not(:near(h3)):not(:near(time)):not(:has-text('Like')):not(:has-text('Comment'))",
-        "div[class*='x1iorvi4']:not(:near(h3)) span[dir='auto']",
-    ],
-    [
-        "div:not(:near(h3)):not([class*='comment']):not([class*='reaction']):not([class*='timestamp']) p",
-        "div:not(:near(h3)):not([class*='comment']):not([class*='reaction']) span:not(:has-text('Like')):not(:has-text('Share'))",
-    ]
-]
-
-# Seletores para imagens
-IMAGE_STRATEGIES = [
-    [
-        "img[src*='scontent']:not([src*='profile']):not([src*='avatar'])",
-        "img[src*='fbcdn']:not([src*='static']):not([src*='profile'])",
-    ],
-    [
-        "img[class*='scaledImageFitWidth']",
-        "img[class*='x1ey2m1c']:not([class*='profile']):not([src*='emoji'])",
-        "img[referrerpolicy='origin-when-cross-origin']:not([src*='emoji']):not([src*='static'])",
-    ],
-    [
-        "div[class*='uiScaledImageContainer'] img:not([src*='profile'])",
-        "div[class*='_46-f'] img:not([src*='profile']):not([src*='avatar'])",
-    ]
-]
-
-# Padrões para excluir do autor
-AUTHOR_EXCLUDE_PATTERNS = [
-    r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)$',
-    r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)\s*(ago|atrás)?$',
-    r'^(há|ago)\s+\d+',
-    r'^(Like|Comment|Share|Curtir|Comentar|Compartilhar|Reply|Responder)$',
-    r'^(Follow|Seguir|See More|Ver Mais|Most Relevant|Top Contributor)$',
-    r'^·$',
-    r'^\d+$',
-    r'^\s*$',
-]
-
-# Padrões para excluir do texto
-TEXT_EXCLUDE_PATTERNS = [
-    r'^(Like|Comment|Share|Curtir|Comentar|Compartilhar|Responder|Reply)$',
-    r'^(Follow|Seguir|See More|Ver Mais|Most Relevant|Top Contributor)$',
-    r'^\d+\s*(like|curtir|comment|comentário|share|compartilhar)s?$',
-    r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas)\s*(ago|atrás)?$',
-    r'^(há|ago)\s+\d+',
-    r'^·$',
-    r'^\d+$',
-    r'^(Translate|Traduzir|See Translation|Ver Tradução)$',
-]
-
-async def expand_article_text(article: Locator):
-    """Expande o texto do artigo clicando no botão 'Ver mais' se existir."""
-    try:
-        see_more_button = article.get_by_role('button', name=re.compile(SEE_MORE_REGEX, re.IGNORECASE)).first
-        if await see_more_button.count() > 0 and await see_more_button.is_visible():
-            await see_more_button.click()
-            await asyncio.sleep(1)  # Aguardar expansão do texto
-            return True
-    except Exception:
-        pass  # Silencioso conforme solicitado
-    return False
 """
-Seletores CSS para elementos do Facebook.
-Centralizados para facilitar manutenção quando o Facebook muda a interface.
+Facebook selectors configuration with robustness improvements.
+Uses ARIA attributes, roles, and multiple fallbacks to handle UI changes.
 """
 
-# Seletores principais para feed e posts
-FEED = "div[role='feed']"
-ARTICLE = "div[role='article'], article[role='article']"
+class FacebookSelectors:
+    """Facebook page selectors with multiple fallbacks."""
 
-# Seletores para diferentes tipos de posts - FOCANDO NA ÁREA REAL DE POSTS
-POST_SELECTORS = [
-    # Seletores mais amplos para capturar posts reais
-    'div[role="article"]',
-    'article[role="article"]', 
-    'div[data-pagelet^="FeedUnit_"]',
-    # Containers de post baseados em estrutura comum
-    'div:has(> div > div > div > div > div h3)',  # Posts com cabeçalho h3
-    'div:has(span[dir="auto"]:has(strong))',     # Posts com nome do autor
-    # Posts que têm botões de curtir/comentar
-    'div:has(div[role="button"]:has-text("Curtir"))',
-    'div:has(div[role="button"]:has-text("Like"))',
-    # Estrutura típica de posts do Facebook
-    'div[class*="x1yztbdb"]',
-    'div[class*="story_body_container"]',
-    # Posts com timestamp visível
-    'div:has(time)',
-    'div:has(a[href*="story_fbid"])',
-    # Fallback mais geral
-    'div:has(img[src*="scontent"]):has(strong)'
-]
+    # Post container selectors - prioritize semantic attributes
+    POST_CONTAINERS = [
+        '[role="article"]',  # Semantic role
+        '[data-pagelet="FeedUnit"]',  # Facebook data attribute
+        '[data-testid="fbfeed_story"]',  # Test ID attribute
+        '.x1yztbdb.x1n2onr6.xh8yej3.x1ja2u2z',  # Class fallback
+        '.x1lliihq.x1plvlek.xryxfnj.x1n2onr6.x193iq5w.xeuugli.x1fj9vlw.x13faqbe.x1vvkbs.x1s928wv.xhkezso.x1gmr53x.x1cpjm7i.x1fgarty.x1943h6x.x1i0vuye.xvs91rp.xo1l8bm.x5n08af.x10wh9bi.x1wdrske.x8viiok.x18hxmgj'
+    ]
 
-# Estratégias para extração de autor - FOCADO NO HEADER DO POST
-AUTHOR_STRATEGIES = [
-    # HEADER PRINCIPAL - onde fica o autor verdadeiro
-    'header h3 a[role="link"] span[dir="auto"]',
-    'header h3 strong',
-    'header h3 span[dir="auto"]:first-child',
-    
-    # PRIMEIRO DIV DO ARTIGO - cabeçalho do post
-    'div[role="article"] > div:first-child h3 a[role="link"] span[dir="auto"]',
-    'div[role="article"] > div:first-child h3 strong',
-    'div[role="article"] > div:first-child h3 span[dir="auto"]',
-    
-    # H3 que é o PRIMEIRO no post (não de comentários)
-    'div[role="article"] h3:first-of-type a[role="link"] span[dir="auto"]',
-    'div[role="article"] h3:first-of-type strong',
-    'div[role="article"] h3:first-of-type span[dir="auto"]',
-    
-    # PRÓXIMO AO TIMESTAMP - indicador de que é header
-    'h3:near(time) a[role="link"] span[dir="auto"]',
-    'h3:near([datetime]) a[role="link"] span[dir="auto"]',
-    'h3:near([aria-label*="há"]) a[role="link"] span[dir="auto"]',
-    'h3:near([aria-label*="ago"]) a[role="link"] span[dir="auto"]'
-]
+    # Author name selectors
+    AUTHOR_SELECTORS = [
+        '[role="link"] strong',  # Link with strong text (name)
+        'h3 [role="link"]',  # Header link
+        'h3 strong a',  # Header strong link
+        '[data-hovercard-prefer-more-content-show="1"] strong',  # Hovercard attribute
+        '.x1heor9g.x1qlqyl8.x1pd3egz.x1a2a7pz strong',  # Class fallback
+        'strong[dir="auto"]',  # Strong with dir attribute
+        'a[role="link"] > span > span'  # Nested span structure
+    ]
 
-# Estratégias para extração de texto
-TEXT_STRATEGIES = [
-    'div[dir="auto"]:visible:not([aria-hidden="true"])',
-    '[data-testid="post_message"] div[dir="auto"]',
-    'div[data-ad-preview="message"] div[dir="auto"]'
-]
+    # Post text content selectors
+    TEXT_SELECTORS = [
+        '[data-ad-preview="message"]',  # Data attribute for message
+        '[data-testid="post_message"]',  # Test ID for post message
+        '[role="article"] [dir="auto"]',  # Article with dir attribute
+        '.x11i5rnm.xat24cr.x1mh8g0r.x1vvkbs',  # Class fallback
+        '.xdj266r.x14z9mp.xat24cr.x1lziwak.x1vvkbs'
+    ]
 
-# Candidatos para mensagens (fallback)
-MESSAGE_CANDIDATES = [
-    '[data-testid="post_message"]',
-    'div[data-ad-preview="message"]',
-    'div[class*="userContent"]',
-    'div[dir="auto"]:not(button div):not(a div)'
-]
+    # Image selectors
+    IMAGE_SELECTORS = [
+        'img[data-visualcompletion="media-vc-image"]',  # Visual completion attribute
+        '[role="img"] img',  # Image role
+        '.x85a59c.x193iq5w img',  # Class with img
+        'img[src*="scontent"]',  # Facebook CDN pattern
+        'img[alt]:not([alt=""])'  # Images with alt text
+    ]
 
-# Estratégias para extração de imagens
-IMAGE_STRATEGIES = [
-    'img[src*="scontent"]',  # Imagens reais do Facebook
-    'div[style*="background-image"][style*="scontent"]',  # Background images
-    'svg image[href*="scontent"]'  # SVG images
-]
+    # Video selectors
+    VIDEO_SELECTORS = [
+        'video[data-video-feature]',  # Video with data attribute
+        '[role="button"][aria-label*="play" i]',  # Play button
+        '.x1lliihq.x5yr21d.xh8yej3 video',  # Class with video
+        '[data-testid="video-component"]'  # Test ID for video
+    ]
 
-# Padrões para excluir de autores
-AUTHOR_EXCLUDE_PATTERNS = [
-    r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)$',
-    r'^\d+\s*(h|hr|hrs|min|mins|m|d|dia|dias|hora|horas|s|sec|seconds)\s*(ago|atrás)?$',
-    r'^(há|ago)\s+\d+',
-    r'^(Like|Comment|Share|Curtir|Comentar|Compartilhar|Reply|Responder)$',
-    r'^(Follow|Seguir|See More|Ver Mais|Most Relevant|Top Contributor)$',
-    r'^·+$',
-    r'^\d+$',
-    r'^\s*$'
-]
+    # Comment box selectors
+    COMMENT_BOX_SELECTORS = [
+        '[role="textbox"][aria-label*="comment" i]',  # Textbox role with comment label
+        '[data-testid="fb-composer-text-area"]',  # Test ID for composer
+        '[contenteditable="true"][aria-label*="comment" i]',  # Contenteditable with comment
+        'div[role="textbox"][data-contents="true"]',  # Textbox with data-contents
+        '.x1i10hfl.xggy1nq.x1s07b3s.x1kdt53j.x1a2a7pz'  # Class fallback
+    ]
 
-# Padrões para excluir de texto
-TEXT_EXCLUDE_PATTERNS = [
-    'ver mais', 'see more', 'mostrar mais',
-    'ver tradução', 'see translation',
-    'curtir', 'comentar', 'compartilhar',
-    'like', 'comment', 'share', 'reply'
-]
+    # Comment submit button selectors
+    COMMENT_SUBMIT_SELECTORS = [
+        '[role="button"][aria-label*="comment" i]',  # Button role with comment
+        '[data-testid="comment-submit"]',  # Test ID for submit
+        'div[role="button"][tabindex="0"]:has-text("Comment")',  # Button with Comment text
+        '.x1i10hfl.xjbqb8w.x1ejq31n.xd10rxx.x1sy0etr.x17r0tee.x972fbf.xcfux6l.x1qhh985.xm0m39n.x9f619.x1ypdohk.xe8uvvx.xdj266r.x11i5rnm.xat24cr.x1mh8g0r.x16tdsg8.x1hl2dhg.xggy1nq.x87ps6o.x1lku1pv.x1a2a7pz.x6s0dn4.xmjcpbm.x107yiy2.xv8uw2v.x1tfwpuw.x2g32xy.x78zum5.x1q0g3np.x1iyjqo2.x1nhvcw1.x1n2onr6.x14atkfc.xcdnw81.x1ldfrly.x1 data:has([tabindex="0"])'
+    ]
 
-# Seletores para botões "Ver mais"
-SEE_MORE_SELECTORS = [
-    'div[role="button"]:has-text("Ver mais")',
-    'div[role="button"]:has-text("See more")',
-    'span[role="button"]:has-text("Ver mais")',
-    'span[role="button"]:has-text("See more")',
-    '*[role="button"]:has-text("Ver mais")',
-    '*[role="button"]:has-text("See more")'
-]
+    # More options (three dots) selectors
+    MORE_OPTIONS_SELECTORS = [
+        '[role="button"][aria-label*="more" i]',  # Button with "more" label
+        '[aria-label*="Action" i][role="button"]',  # Action button
+        'div[role="button"][aria-haspopup="menu"]',  # Button with menu popup
+        '.x1i10hfl.xjbqb8w.x1ejq31n.xd10rxx.x1sy0etr.x17r0tee.x972fbf.xcfux6l.x1qhh985.xm0m39n.x9f619.x1ypdohk.xe8uvvx.xdj266r.x11i5rnm.xat24cr.x1mh8g0r.x16tdsg8.x1hl2dhg.xggy1nq.x87ps6o.x1lku1pv.x1a2a7pz.x6s0dn4.x1ejq31n.xd10rxx.x1sy0etr.x17r0tee.x972fbf.xcfux6l.x1qhh985.xm0m39n.x9f619.x1ypdohk.xdj266r.x11i5rnm.xat24cr.x1mh8g0r.x1hl2dhg.xggy1nq.x87ps6o.x1lku1pv.x1a2a7pz.xbtce8p.x14atkfc.x1d5rgwi'
+    ]
 
-# Seletores para comentários
-COMMENT_BUTTON_SELECTORS = [
-    'div[role="button"]:has-text("Comentar")',
-    'div[role="button"]:has-text("Comment")',
-    '[aria-label*="omment" i]',
-    '[aria-label*="comentar" i]',
-    '[data-testid*="comment"]'
-]
+    # "See more" text indicators to filter out
+    SEE_MORE_PATTERNS = [
+        "see more",
+        "ver mais", 
+        "voir plus",
+        "más",
+        "show more",
+        "mostrar mais"
+    ]
 
-COMMENT_TEXTBOX_SELECTORS = [
-    'div[contenteditable="true"][role="textbox"]',
-    'textarea[placeholder*="omment"], textarea[placeholder*="comentar"]',
-    '[data-testid="UFI2CommentTextarea"]'
-]
+    # Invalid author patterns (timestamps, UI elements)
+    INVALID_AUTHOR_PATTERNS = [
+        r'^\d+\s*(min|h|hr|hrs|d|dia|dias|hora|horas|s|sec|seconds)$',
+        r'^\d+\s*(min|h|hr|hrs|d|dia|dias|hora|horas|s|sec|seconds)\s*(ago|atrás)?$',
+        r'^(há|ago)\s+\d+',
+        r'^(like|comment|share|curtir|comentar|compartilhar)$',
+        r'^\d+$',  # Just numbers
+        r'^(sponsored|patrocinado)$'  # Sponsored content
+    ]
 
-async def expand_article_text(article):
-    """Expande texto do artigo clicando em 'Ver mais' se disponível."""
-    try:
-        for selector in SEE_MORE_SELECTORS:
-            try:
-                see_more = article.locator(selector).first()
-                if await see_more.count() > 0 and await see_more.is_visible():
-                    await see_more.click()
-                    import asyncio
-                    await asyncio.sleep(2)
-                    return True
-            except Exception:
-                continue
-        return False
-    except Exception:
-        return False
+    @classmethod
+    def get_post_containers(cls):
+        """Get post container selectors in priority order."""
+        return cls.POST_CONTAINERS
+
+    @classmethod
+    def get_author_selectors(cls):
+        """Get author name selectors in priority order."""
+        return cls.AUTHOR_SELECTORS
+
+    @classmethod
+    def get_text_selectors(cls):
+        """Get post text selectors in priority order."""
+        return cls.TEXT_SELECTORS
+
+    @classmethod
+    def get_image_selectors(cls):
+        """Get image selectors in priority order."""
+        return cls.IMAGE_SELECTORS
+
+    @classmethod
+    def get_video_selectors(cls):
+        """Get video selectors in priority order."""
+        return cls.VIDEO_SELECTORS
+
+    @classmethod
+    def get_comment_box_selectors(cls):
+        """Get comment box selectors in priority order."""
+        return cls.COMMENT_BOX_SELECTORS
+
+    @classmethod
+    def get_comment_submit_selectors(cls):
+        """Get comment submit button selectors in priority order."""
+        return cls.COMMENT_SUBMIT_SELECTORS
+
+    @classmethod
+    def get_more_options_selectors(cls):
+        """Get more options button selectors in priority order."""
+        return cls.MORE_OPTIONS_SELECTORS

@@ -11,6 +11,7 @@ from fb_bot.login import fb_login
 from fb_bot.monitor import navigate_to_group, find_next_valid_post, extract_post_id, extract_post_details
 from fb_bot.commenter import open_comment_box, send_comment
 from fb_bot.n8n_client import ask_n8n, healthcheck_n8n
+from fb_bot.circuit_breaker import facebook_circuit_breaker, retry_with_backoff, RetryConfig
 
 # Global stop event for clean shutdown
 stop_event = threading.Event()
@@ -24,58 +25,68 @@ class PostProcessor:
         self.leads_found_session = 0
 
     async def process_post(self, post_element, page) -> bool:
-        """Processa um único post."""
-        # Check stop event
-        if stop_event.is_set():
-            return False
+        """Processa um único post com circuit breaker protection."""
+        
+        async def _process_post_core():
+            # Check stop event
+            if stop_event.is_set():
+                return False
 
-        # Extrair ID
-        post_id = await extract_post_id(post_element)
-        if not post_id:
-            bot_logger.warning("Não foi possível extrair ID do post")
-            return False
+            # Extrair ID
+            post_id = await extract_post_id(post_element)
+            if not post_id:
+                bot_logger.warning("Não foi possível extrair ID do post")
+                return False
 
-        # Verificar se já foi processado
-        if self.state.has(post_id):
-            bot_logger.debug(f"Post {post_id} já processado")
-            return False
+            # Verificar se já foi processado
+            if self.state.has(post_id):
+                bot_logger.debug(f"Post {post_id} já processado")
+                return False
 
-        # Extrair detalhes com retry
-        details = await self._extract_with_retry(post_element)
-        if not details:
+            # Extrair detalhes com retry
+            details = await self._extract_with_retry(post_element)
+            if not details:
+                self.state.add(post_id)
+                return False
+
+            # Validar conteúdo
+            if not self._is_valid_post(details):
+                self.state.add(post_id)
+                return False
+
+            # Verificar palavras-chave
+            if not self._matches_keywords(details.get('text', '')):
+                bot_logger.debug("Post filtrado - sem palavras-chave relevantes")
+                self.state.add(post_id)
+                return False
+
+            # Lead encontrado!
+            bot_logger.info(f"LEAD ENCONTRADO: {details.get('author', 'N/A')}")
+            bot_logger.info(f"Texto: {details.get('text', '')[:100]}...")
+
+            # Enviar para n8n com backoff exponencial
+            reply = await self._get_ai_response_async(details, post_id)
+            if not reply:
+                self.state.add(post_id)
+                return False
+
+            # Comentar com circuit breaker
+            success = await facebook_circuit_breaker.call(
+                self._send_comment, post_element, reply
+            )
             self.state.add(post_id)
+
+            if success:
+                self.leads_found_session += 1
+                bot_logger.info(f"Comentário enviado! Total de leads: {self.leads_found_session}")
+
+            return success
+        
+        try:
+            return await _process_post_core()
+        except Exception as e:
+            bot_logger.error(f"Erro protegido por circuit breaker: {e}")
             return False
-
-        # Validar conteúdo
-        if not self._is_valid_post(details):
-            self.state.add(post_id)
-            return False
-
-        # Verificar palavras-chave
-        if not self._matches_keywords(details.get('text', '')):
-            bot_logger.debug("Post filtrado - sem palavras-chave relevantes")
-            self.state.add(post_id)
-            return False
-
-        # Lead encontrado!
-        bot_logger.info(f"LEAD ENCONTRADO: {details.get('author', 'N/A')}")
-        bot_logger.info(f"Texto: {details.get('text', '')[:100]}...")
-
-        # Enviar para n8n com backoff exponencial
-        reply = await self._get_ai_response_async(details, post_id)
-        if not reply:
-            self.state.add(post_id)
-            return False
-
-        # Comentar
-        success = await self._send_comment(post_element, reply)
-        self.state.add(post_id)
-
-        if success:
-            self.leads_found_session += 1
-            bot_logger.info(f"Comentário enviado! Total de leads: {self.leads_found_session}")
-
-        return success
 
     async def _extract_with_retry(self, post_element, max_retries: int = 2):
         """Extrai detalhes com retry limitado."""

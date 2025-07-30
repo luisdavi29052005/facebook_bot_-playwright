@@ -1,17 +1,17 @@
-import asyncio
-import hashlib
-import logging
 import re
-import os
-from datetime import datetime
-from pathlib import Path
+import asyncio
+import logging
+from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
 from playwright.async_api import Page, Locator
+
 from logger import bot_logger
 from .selectors import (
     FEED, ARTICLE, POST_SELECTORS, AUTHOR_STRATEGIES, TEXT_STRATEGIES, 
     IMAGE_STRATEGIES, AUTHOR_EXCLUDE_PATTERNS, TEXT_EXCLUDE_PATTERNS,
     expand_article_text
 )
+from .selectors import FacebookSelectors # Added FacebookSelectors import
 
 # Configurar logging para este módulo
 logging.basicConfig(level=logging.INFO)
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 async def debug_dump_article(article: Locator, tag: str):
     """
     Salva screenshot e HTML do artigo para debug.
-    
+
     Args:
         article: Elemento do artigo
         tag: Tag para identificar o tipo de problema (missing_author, missing_text, missing_images)
@@ -28,22 +28,22 @@ async def debug_dump_article(article: Locator, tag: str):
     try:
         # Criar timestamp único
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # microseconds truncados
-        
+
         # Criar diretórios se não existirem
         screenshots_dir = Path("screenshots/articles")
         html_dumps_dir = Path("html_dumps/articles")
         screenshots_dir.mkdir(parents=True, exist_ok=True)
         html_dumps_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Salvar screenshot
         screenshot_path = screenshots_dir / f"{timestamp}_{tag}.png"
         await article.screenshot(path=str(screenshot_path))
         bot_logger.debug(f"Screenshot salvo: {screenshot_path}")
-        
+
         # Salvar HTML
         html_path = html_dumps_dir / f"{timestamp}_{tag}.html"
         inner_html = await article.inner_html()
-        
+
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(f"""<!DOCTYPE html>
 <html>
@@ -67,36 +67,36 @@ async def debug_dump_article(article: Locator, tag: str):
     </div>
 </body>
 </html>""")
-        
+
         bot_logger.debug(f"HTML dump salvo: {html_path}")
-        
+
     except Exception as e:
         bot_logger.warning(f"Erro ao criar debug dump: {e}")
 
 async def navigate_to_group(page: Page, group_url: str):
     """Navega para um grupo do Facebook com retry robusta."""
     bot_logger.info(f"Acessando grupo: {group_url}")
-    
+
     # Retry com fallback de load-state
     for attempt in range(3):
         try:
             bot_logger.info(f"Tentativa {attempt + 1}/3 de navegação")
-            
+
             # Navegar com wait_until domcontentloaded
             response = await page.goto(group_url, wait_until='domcontentloaded', timeout=45000)
-            
+
             if response and response.status >= 400:
                 raise Exception(f"Status HTTP {response.status}")
-            
+
             bot_logger.debug(f"Navegação bem-sucedida (status: {response.status if response else 'N/A'})")
-            
+
             # Aguardar rede ficar ociosa com timeout maior
             try:
                 await page.wait_for_load_state("networkidle", timeout=15000)
                 bot_logger.debug("NetworkIdle atingido")
             except Exception:
                 bot_logger.debug("Timeout networkidle - continuando")
-            
+
             # Aguardar múltiplos indicadores de carregamento
             feed_indicators = [
                 "div[role='feed']",
@@ -105,7 +105,7 @@ async def navigate_to_group(page: Page, group_url: str):
                 "article[role='article']",
                 "div[data-pagelet^='FeedUnit_']"
             ]
-            
+
             feed_found = False
             for indicator in feed_indicators:
                 try:
@@ -115,13 +115,13 @@ async def navigate_to_group(page: Page, group_url: str):
                     break
                 except Exception:
                     continue
-            
+
             if not feed_found:
                 bot_logger.warning(f"Nenhum indicador de feed encontrado na tentativa {attempt + 1}")
                 # Ainda assim, tentar rolar para ativar carregamento
                 await page.mouse.wheel(0, 800)
                 await asyncio.sleep(3)
-                
+
                 # Verificar novamente
                 for indicator in feed_indicators:
                     try:
@@ -131,20 +131,20 @@ async def navigate_to_group(page: Page, group_url: str):
                         break
                     except Exception:
                         continue
-            
+
             if feed_found or attempt == 2:  # Aceitar na última tentativa mesmo sem feed
                 # Rolar para ativar o carregamento de posts
                 await page.mouse.wheel(0, 1000)
                 await asyncio.sleep(2)
-                
+
                 # Aguardar conteúdo adicional carregar
                 await asyncio.sleep(3)
-                
+
                 bot_logger.success("Navegação para grupo concluída")
                 return
             else:
                 raise Exception("Feed não carregou após scroll")
-                
+
         except Exception as e:
             bot_logger.warning(f"Erro na tentativa {attempt + 1}: {e}")
             if attempt < 2:
@@ -160,7 +160,7 @@ async def wait_post_ready(post: Locator):
     """
     Aguarda o post sair do estado de loading/skeleton antes de extrair dados.
     Anti-skeleton robusto para evitar extração prematura.
-    
+
     Args:
         post: Elemento do post
     """
@@ -168,10 +168,10 @@ async def wait_post_ready(post: Locator):
         # Verificar se a página ainda está ativa
         if post.page.is_closed():
             return
-        
+
         # Rolar até o post para garantir visibilidade
         await post.scroll_into_view_if_needed()
-        
+
         # Aguardar múltiplos tipos de skeleton/loading
         skeleton_selectors = [
             '[role="status"][data-visualcompletion="loading-state"]',
@@ -181,7 +181,7 @@ async def wait_post_ready(post: Locator):
             '.placeholder',
             '[data-placeholder="1"]'
         ]
-        
+
         for selector in skeleton_selectors:
             try:
                 skeleton = post.locator(selector).first()
@@ -190,7 +190,7 @@ async def wait_post_ready(post: Locator):
                     await skeleton.wait_for(state='detached', timeout=8000)
             except Exception:
                 continue
-        
+
         # Aguardar imagens reais carregarem
         try:
             # Verificar placeholders de imagem
@@ -199,7 +199,7 @@ async def wait_post_ready(post: Locator):
                 'img[src*="static"]',
                 'img[src=""]'
             ]
-            
+
             for selector in placeholder_selectors:
                 placeholder = post.locator(selector).first()
                 if await placeholder.count() > 0:
@@ -209,7 +209,7 @@ async def wait_post_ready(post: Locator):
                     break
         except Exception:
             pass
-        
+
         # Aguardar conteúdo de texto aparecer (não apenas skeleton)
         try:
             # Verificar se há texto real ou ainda é placeholder
@@ -219,37 +219,37 @@ async def wait_post_ready(post: Locator):
                 await asyncio.sleep(1.5)
         except Exception:
             pass
-        
+
         # Aguardar rede ficar ociosa (timeout baixo)
         try:
             await post.page.wait_for_load_state("networkidle", timeout=2000)
         except Exception:
             pass
-        
+
         # Delay final para garantir renderização
         await asyncio.sleep(0.8)
-        
+
     except Exception as e:
         bot_logger.debug(f"Erro aguardando post pronto: {e}")
 
 async def is_valid_post(article) -> bool:
     """
     Valida se o elemento é um post real - OTIMIZADO para processamento sequencial.
-    
+
     Critérios rápidos para filtrar:
     - Deve ter estrutura de post (role=article OU indicadores básicos)
     - Não deve ser elemento de UI/navegação
     - Deve ter conteúdo mínimo (autor E/OU texto/imagem)
-    
+
     Args:
         article: Elemento do artigo a ser validado
-        
+
     Returns:
         bool: True se for um post válido
     """
     try:
         # ═══ VALIDAÇÃO RÁPIDA ═══
-        
+
         # 1. Verificar role="article" (indicador mais confiável)
         role = await article.get_attribute("role")
         if role == "article":
@@ -257,36 +257,36 @@ async def is_valid_post(article) -> bool:
             if not await _is_obvious_ui_element(article):
                 bot_logger.debug("✅ Post validado: role=article + não é UI")
                 return True
-        
+
         # 2. Se não tem role="article", fazer verificações mais específicas
-        
+
         # Verificar se tem indicadores básicos de post
         has_author_indicator = await _has_author_indicator_fast(article)
         has_content_indicator = await _has_content_indicator_fast(article)
-        
+
         # Precisa ter pelo menos UM indicador válido
         if not (has_author_indicator or has_content_indicator):
             bot_logger.debug("❌ Post rejeitado: sem indicadores básicos")
             return False
-        
+
         # 3. Filtrar elementos claramente de UI
         if await _is_obvious_ui_element(article):
             bot_logger.debug("❌ Post rejeitado: elemento de UI")
             return False
-        
+
         # 4. Verificar se tem timestamp (posts reais têm timestamp)
         if await _has_timestamp_indicator(article):
             bot_logger.debug("✅ Post validado: tem timestamp + indicadores")
             return True
-        
+
         # 5. Fallback: se tem conteúdo suficiente, aceitar
         if has_author_indicator and has_content_indicator:
             bot_logger.debug("✅ Post validado: autor + conteúdo")
             return True
-        
+
         bot_logger.debug("❌ Post rejeitado: não passou nas validações")
         return False
-        
+
     except Exception as e:
         bot_logger.debug(f"⚠️ Erro na validação do post: {e}")
         return False
@@ -305,7 +305,7 @@ async def _has_valid_timestamp(article) -> bool:
             "a[href*='/posts/'] span",
             "a[href*='/permalink/'] span"
         ]
-        
+
         for selector in timestamp_selectors:
             try:
                 timestamp_elem = article.locator(selector).first()
@@ -324,14 +324,14 @@ async def _has_valid_timestamp(article) -> bool:
                             r'\d{1,2}:\d{2}',  # Horário
                             r'\d{1,2}/\d{1,2}/\d{2,4}'  # Data
                         ]
-                        
+
                         if any(re.search(pattern, text_lower) for pattern in timestamp_patterns):
                             return True
             except Exception:
                 continue
-        
+
         return False
-        
+
     except Exception:
         return False
 
@@ -345,7 +345,7 @@ async def _has_valid_author_link(article) -> bool:
             "a[href*='/people/']",
             "a[href*='facebook.com/'][role='link']"
         ]
-        
+
         for selector in author_link_selectors:
             try:
                 link_elem = article.locator(selector).first()
@@ -364,9 +364,9 @@ async def _has_valid_author_link(article) -> bool:
                                 return True
             except Exception:
                 continue
-        
+
         return False
-        
+
     except Exception:
         return False
 
@@ -377,9 +377,9 @@ async def _is_ui_element(article) -> bool:
         full_text = await article.text_content()
         if not full_text:
             return True
-        
+
         text_lower = full_text.lower()
-        
+
         # Palavras-chave que indicam elementos de UI
         ui_keywords = [
             # Interface do Facebook
@@ -388,62 +388,62 @@ async def _is_ui_element(article) -> bool:
             'acontecendo agora', 'happening now',
             'escreva algo', 'write something', 'what\'s on your mind',
             'no que você está pensando', 'o que você está pensando',
-            
+
             # Criação de conteúdo
             'criar publicação', 'create post', 'make post',
             'adicionar foto', 'add photo', 'upload photo',
             'adicionar vídeo', 'add video', 'upload video',
             'transmitir ao vivo', 'go live', 'live video',
             'criar enquete', 'create poll',
-            
+
             # Navegação e menus
             'feed', 'timeline', 'linha do tempo',
             'sugestões para você', 'suggestions for you',
             'pessoas que você pode conhecer', 'people you may know',
             'grupos sugeridos', 'suggested groups',
             'patrocinado', 'sponsored', 'anúncio', 'ad',
-            
+
             # Ações e botões
             'curtir página', 'like page',
             'seguir', 'follow', 'unfollow',
             'participar do grupo', 'join group',
             'convidar amigos', 'invite friends',
             'compartilhar no seu story', 'share to your story',
-            
+
             # Carregamento e placeholders
             'carregando', 'loading',
             'aguarde', 'please wait',
             'sem posts para mostrar', 'no posts to show',
-            
+
             # Headers e títulos de seção
             'publicações', 'posts section',
             'atividade recente', 'recent activity',
             'destaques', 'highlights'
         ]
-        
+
         # Verificar se contém palavras de UI
         for keyword in ui_keywords:
             if keyword in text_lower:
                 bot_logger.debug(f"UI element detectado: '{keyword}' encontrado")
                 return True
-        
+
         # Verificar se é muito curto para ser um post real
         if len(full_text.strip()) < 10:
             return True
-        
+
         # Verificar se contém apenas botões/ações
         action_only_patterns = [
             r'^(curtir|like|comentar|comment|compartilhar|share)$',
             r'^(seguir|follow|participar|join)$',
             r'^\d+\s*(curtida|like|comentário|comment)s?$'
         ]
-        
+
         for pattern in action_only_patterns:
             if re.match(pattern, text_lower.strip()):
                 return True
-        
+
         return False
-        
+
     except Exception as e:
         bot_logger.debug(f"Erro ao verificar UI element: {e}")
         return False
@@ -464,14 +464,14 @@ async def _has_author_indicator_fast(article) -> bool:
                     'min', 'hora', 'h', 'd', 'há', 'ago', 'like', 'comment', 'share'
                 ]):
                     return True
-        
+
         # Verificar links de perfil
         profile_links = article.locator('a[role="link"]')
         if await profile_links.count() > 0:
             return True
-        
+
         return False
-        
+
     except Exception:
         return False
 
@@ -482,19 +482,19 @@ async def _has_content_indicator_fast(article) -> bool:
         text_content = await article.text_content()
         if text_content and len(text_content.strip()) > 30:
             return True
-        
+
         # Verificar se tem imagem do Facebook
         images = article.locator('img[src*="scontent"]')
         if await images.count() > 0:
             return True
-        
+
         # Verificar se tem vídeo
         videos = article.locator('video')
         if await videos.count() > 0:
             return True
-        
+
         return False
-        
+
     except Exception:
         return False
 
@@ -507,16 +507,16 @@ async def _has_timestamp_indicator(article) -> bool:
             'a[href*="story_fbid"]',
             'span:regex("^\\d+\\s*(min|h|d|hora)")'
         ]
-        
+
         for selector in timestamp_selectors:
             try:
                 if await article.locator(selector).count() > 0:
                     return True
             except Exception:
                 continue
-        
+
         return False
-        
+
     except Exception:
         return False
 
@@ -527,9 +527,9 @@ async def _is_obvious_ui_element(article) -> bool:
         text_content = await article.text_content()
         if not text_content:
             return False
-        
+
         text_snippet = text_content[:200].lower()
-        
+
         # Palavras-chave que identificam UI do Facebook
         ui_keywords = [
             'escreva algo', 'write something', 'what\'s on your mind',
@@ -539,18 +539,18 @@ async def _is_obvious_ui_element(article) -> bool:
             'happening now', 'acontecendo agora',
             'join group', 'participar do grupo'
         ]
-        
+
         # Se encontrar qualquer keyword de UI, rejeitar
         for keyword in ui_keywords:
             if keyword in text_snippet:
                 return True
-        
+
         # Se o texto é muito curto, provavelmente é UI
         if len(text_content.strip()) < 15:
             return True
-        
+
         return False
-        
+
     except Exception:
         return False
 
@@ -563,7 +563,7 @@ async def _has_minimum_content(article) -> bool:
             '[data-testid="post_message"]',
             'div[data-ad-preview="message"]'
         ]
-        
+
         all_text = ""
         for selector in content_selectors:
             try:
@@ -577,22 +577,22 @@ async def _has_minimum_content(article) -> bool:
                             all_text += " " + text.strip()
             except Exception:
                 continue
-        
+
         # Se não encontrou texto específico, usar texto geral
         if not all_text.strip():
             all_text = await article.text_content() or ""
-        
+
         # Filtrar texto de UI/ações
         lines = all_text.split('\n')
         relevant_lines = []
-        
+
         for line in lines:
             line_clean = line.strip()
             if len(line_clean) < 5:  # Muito curto
                 continue
-                
+
             line_lower = line_clean.lower()
-            
+
             # Filtrar linhas de ação/UI
             ui_line_patterns = [
                 'curtir', 'comentar', 'compartilhar',
@@ -602,28 +602,28 @@ async def _has_minimum_content(article) -> bool:
                 'follow', 'seguir', 'unfollow',
                 'min', 'hora', 'day', 'ago', 'há'
             ]
-            
+
             # Se a linha tem só palavras de UI, pular
             if (len(line_clean) < 20 and 
                 any(ui_word in line_lower for ui_word in ui_line_patterns)):
                 continue
-            
+
             # Se a linha tem pelo menos algumas letras, considerar
             if re.search(r'[a-zA-ZÀ-ÿ]', line_clean):
                 relevant_lines.append(line_clean)
-        
+
         # Juntar texto relevante
         relevant_text = ' '.join(relevant_lines).strip()
-        
+
         # Verificar se tem conteúdo mínimo
         min_length = 20
         has_enough_content = len(relevant_text) >= min_length
-        
+
         if not has_enough_content:
             bot_logger.debug(f"Conteúdo insuficiente: {len(relevant_text)} chars (mín: {min_length})")
-        
+
         return has_enough_content
-        
+
     except Exception as e:
         bot_logger.debug(f"Erro ao verificar conteúdo mínimo: {e}")
         return False
@@ -631,16 +631,16 @@ async def _has_minimum_content(article) -> bool:
 async def find_next_valid_post(page: Page) -> Locator:
     """
     Encontra o PRÓXIMO post válido de forma sequencial - UM POR VEZ.
-    
+
     Fluxo:
     1. Procura posts visíveis na tela atual
     2. Retorna o PRIMEIRO post válido encontrado
     3. Se não encontrar, rola página e tenta novamente
     4. Foco em processamento individual, não em lote
-    
+
     Args:
         page: Página do Playwright
-        
+
     Returns:
         Locator do próximo post válido ou None se não encontrou
     """
@@ -658,15 +658,11 @@ async def find_next_valid_post(page: Page) -> Locator:
         bot_logger.debug("Timeout domcontentloaded - continuando")
 
     # Seletores priorizados para posts do Facebook
-    post_selectors = [
-        'div[role="article"]',                    # Padrão principal
-        'article[role="article"]',                # Alternativo
-        'div[data-pagelet^="FeedUnit_"]'         # Posts específicos
-    ]
+    post_selectors = FacebookSelectors.get_post_containers()
 
     # Tentar encontrar post na viewport atual primeiro
     for attempt in range(2):  # Máximo 2 tentativas (atual + scroll)
-        
+
         if attempt == 1:
             # Segunda tentativa: rolar para carregar mais conteúdo
             bot_logger.debug("📜 Rolando para carregar mais posts...")
@@ -681,10 +677,10 @@ async def find_next_valid_post(page: Page) -> Locator:
         for selector_idx, selector in enumerate(post_selectors):
             try:
                 bot_logger.debug(f"🔍 Tentativa {attempt + 1} - Seletor {selector_idx + 1}: {selector}")
-                
+
                 posts = page.locator(selector)
                 count = await posts.count()
-                
+
                 bot_logger.debug(f"   📊 {count} elementos encontrados")
 
                 if count == 0:
@@ -881,8 +877,7 @@ async def extract_post_details(post: Locator):
     images = await _extract_images(post)
 
     # Verificar se há vídeo no post
-    video_elem = post.locator("video")
-    has_video = await video_elem.count() > 0
+    has_video = await has_video(post)
     if has_video:
         bot_logger.debug("Post contém vídeo; marcando como conteúdo visual")
 
@@ -948,21 +943,21 @@ async def _extract_author(post: Locator) -> str:
         try:
             timestamp_elements = post.locator(ts_selector)
             ts_count = await timestamp_elements.count()
-            
+
             for ts_idx in range(min(ts_count, 3)):  # Verificar primeiros 3 timestamps
                 try:
                     timestamp_elem = timestamp_elements.nth(ts_idx)
-                    
+
                     if not await timestamp_elem.is_visible():
                         continue
-                    
+
                     # Verificar se é um timestamp válido
                     ts_text = await timestamp_elem.text_content()
                     if not ts_text or not _is_valid_timestamp(ts_text.strip()):
                         continue
-                    
+
                     bot_logger.debug(f"🕒 Timestamp encontrado: '{ts_text.strip()}' - buscando autor adjacente...")
-                    
+
                     # BUSCAR AUTOR NO MESMO CONTAINER/NIVEL DO TIMESTAMP
                     # Estratégias de busca a partir do timestamp
                     author_search_strategies = [
@@ -970,59 +965,59 @@ async def _extract_author(post: Locator) -> str:
                         'xpath=ancestor::*[1]//a[@role="link"]//span[@dir="auto"]',
                         'xpath=ancestor::*[1]//strong',
                         'xpath=ancestor::*[1]//span[@dir="auto"]',
-                        
+
                         # Container pai, buscar h3 com autor
                         'xpath=ancestor::*[2]//h3//a[@role="link"]//span[@dir="auto"]',
                         'xpath=ancestor::*[2]//h3//strong',
-                        
+
                         # Ir para container do header do post
                         'xpath=ancestor::*[3]//h3//a[@role="link"]//span[@dir="auto"]',
                         'xpath=ancestor::*[3]//h3//strong',
-                        
+
                         # Buscar elementos de autor que precedem o timestamp
                         'xpath=preceding::a[@role="link"]//span[@dir="auto"][1]',
                         'xpath=preceding::strong[1]'
                     ]
-                    
+
                     for search_strategy in author_search_strategies:
                         try:
                             author_candidates = timestamp_elem.locator(search_strategy)
                             auth_count = await author_candidates.count()
-                            
+
                             for auth_idx in range(min(auth_count, 3)):
                                 try:
                                     author_elem = author_candidates.nth(auth_idx)
-                                    
+
                                     if not await author_elem.is_visible():
                                         continue
-                                    
+
                                     author_text = (await author_elem.inner_text() or "").strip()
-                                    
+
                                     if not author_text:
                                         continue
-                                    
+
                                     # Limpar nome (remover separadores)
                                     clean_name = author_text.split('·')[0].split('•')[0].split('\n')[0].strip()
-                                    
+
                                     # Validar se é um nome de pessoa válido
                                     if await _is_valid_author_name(clean_name, author_elem):
                                         # Verificar proximidade ao timestamp (deve estar próximo)
                                         if await _is_author_near_timestamp(author_elem, timestamp_elem):
                                             bot_logger.success(f"✅ AUTOR ENCONTRADO: '{clean_name}' (próximo ao timestamp: '{ts_text.strip()}')")
                                             return clean_name
-                                    
+
                                 except Exception as e:
                                     bot_logger.debug(f"Erro verificando candidato a autor {auth_idx}: {e}")
                                     continue
-                        
+
                         except Exception as e:
                             bot_logger.debug(f"Erro na estratégia '{search_strategy}': {e}")
                             continue
-                    
+
                 except Exception as e:
                     bot_logger.debug(f"Erro processando timestamp {ts_idx}: {e}")
                     continue
-                    
+
         except Exception as e:
             bot_logger.debug(f"Erro na busca de timestamp '{ts_selector}': {e}")
             continue
@@ -1030,40 +1025,40 @@ async def _extract_author(post: Locator) -> str:
     # FALLBACK: Buscar autor no primeiro h3 visível do post (sem comentários)
     try:
         bot_logger.debug("🔍 Fallback: buscando primeiro h3 do post...")
-        
+
         first_h3_strategies = [
             'h3:first-of-type a[role="link"] span[dir="auto"]',
             'h3:first-of-type strong',
             'h3:first-of-type span[dir="auto"]:first-child'
         ]
-        
+
         for h3_strategy in first_h3_strategies:
             try:
                 h3_elements = post.locator(h3_strategy)
                 h3_count = await h3_elements.count()
-                
+
                 for i in range(min(h3_count, 2)):
                     try:
                         h3_elem = h3_elements.nth(i)
-                        
+
                         if not await h3_elem.is_visible():
                             continue
-                        
+
                         h3_text = (await h3_elem.inner_text() or "").strip()
                         clean_name = h3_text.split('·')[0].split('•')[0].split('\n')[0].strip()
-                        
+
                         if await _is_valid_author_name(clean_name, h3_elem):
                             # Verificar se não está em área de comentários
                             if not await _is_inside_comment_section(h3_elem):
                                 bot_logger.debug(f"✅ Autor encontrado no fallback h3: '{clean_name}'")
                                 return clean_name
-                    
+
                     except Exception:
                         continue
-                        
+
             except Exception:
                 continue
-                
+
     except Exception as e:
         bot_logger.debug(f"Erro no fallback h3: {e}")
 
@@ -1074,9 +1069,9 @@ def _is_valid_timestamp(text: str) -> bool:
     """Valida se o texto parece um timestamp válido."""
     if not text:
         return False
-    
+
     text_lower = text.lower()
-    
+
     # Padrões de timestamp válidos
     timestamp_patterns = [
         r'\d+\s*(min|minuto|minutos|m)(?:$|\s)',
@@ -1088,7 +1083,7 @@ def _is_valid_timestamp(text: str) -> bool:
         r'\d{1,2}/\d{1,2}',
         r'\d{1,2}:\d{2}'
     ]
-    
+
     return any(re.search(pattern, text_lower) for pattern in timestamp_patterns)
 
 async def _is_author_near_timestamp(author_elem: Locator, timestamp_elem: Locator) -> bool:
@@ -1097,34 +1092,34 @@ async def _is_author_near_timestamp(author_elem: Locator, timestamp_elem: Locato
         # Verificar se estão no mesmo container pai ou próximos
         author_box = await author_elem.bounding_box()
         timestamp_box = await timestamp_elem.bounding_box()
-        
+
         if not author_box or not timestamp_box:
             return False
-        
+
         # Calcular distância vertical (devem estar na mesma linha ou próximas)
         vertical_distance = abs(author_box['y'] - timestamp_box['y'])
-        
+
         # Se estão a menos de 50px de distância vertical, considerar próximos
         return vertical_distance < 50
-        
+
     except Exception:
         return True  # Se não conseguir calcular, assumir que está próximo
 
 async def _is_valid_author_name(name: str, elem: Locator) -> bool:
     """Valida se o nome extraído é realmente um autor válido."""
     import re
-    
+
     if not name or len(name) < 2:
         return False
-    
+
     # Muito longo para ser nome
     if len(name) > 100:
         return False
-    
+
     # Contém apenas letras, espaços, hífens e acentos
     if not re.match(r'^[A-Za-zÀ-ÿ\s\-\.\']+$', name):
         return False
-    
+
     # Não pode ser termo de UI (mais rigoroso)
     ui_terms = [
         'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar',
@@ -1133,36 +1128,36 @@ async def _is_valid_author_name(name: str, elem: Locator) -> bool:
         'curtida', 'curtidas', 'reagir', 'react', 'reaction', 'reação',
         'photofix', 'studio'  # Filtrar nomes de empresa/página quando aparecem como comentário
     ]
-    
+
     name_lower = name.lower()
-    
+
     # Verificar se contém termos de UI
     if any(term in name_lower for term in ui_terms):
         return False
-    
+
     # Não pode ser timestamp
     if re.match(r'^\d+\s*(min|h|d|hora|horas|dia|dias)', name_lower):
         return False
-    
+
     # Não pode ser apenas números ou símbolos
     if re.match(r'^[\d\s\-\·\•]+$', name):
         return False
-    
+
     # Deve ter pelo menos uma letra
     if not re.search(r'[A-Za-zÀ-ÿ]', name):
         return False
-    
+
     # Verificar se não é termo isolado suspeito
     words = name_lower.split()
     suspicious_single_words = ['sure', 'ok', 'yes', 'no', 'sim', 'não']
     if len(words) == 1 and words[0] in suspicious_single_words:
         return False
-    
+
     # Deve ter pelo menos 3 caracteres alfabéticos
     alpha_count = sum(1 for c in name if c.isalpha())
     if alpha_count < 3:
         return False
-    
+
     return True
 
 async def _is_inside_comment_section(elem: Locator) -> bool:
@@ -1177,7 +1172,7 @@ async def _is_inside_comment_section(elem: Locator) -> bool:
                 return True
         except Exception:
             pass
-        
+
         # Verificar se está dentro de elementos típicos de comentários
         comment_indicators = [
             '[role="article"] [role="article"]',  # Post dentro de post (comentário)
@@ -1185,7 +1180,7 @@ async def _is_inside_comment_section(elem: Locator) -> bool:
             '[aria-label*="comment"]', 
             '[aria-label*="comentário"]'
         ]
-        
+
         for indicator in comment_indicators:
             try:
                 ancestor_check = elem.locator(f'xpath=ancestor::{indicator}')
@@ -1194,14 +1189,14 @@ async def _is_inside_comment_section(elem: Locator) -> bool:
                     return True
             except Exception:
                 continue
-        
+
         # Verificar distância do topo do post (comentários estão mais abaixo)
         try:
             post_container = elem.locator('xpath=ancestor::div[@role="article"]')
             if await post_container.count() > 0:
                 post_box = await post_container.first().bounding_box()
                 elem_box = await elem.bounding_box()
-                
+
                 if post_box and elem_box:
                     # Se o elemento está muito abaixo do início do post, pode ser comentário
                     distance_from_top = elem_box['y'] - post_box['y']
@@ -1210,23 +1205,23 @@ async def _is_inside_comment_section(elem: Locator) -> bool:
                         return True
         except Exception:
             pass
-        
+
         # Verificar se o texto ao redor contém muitos indicadores de comentário
         try:
             context_text = await elem.locator('xpath=ancestor::*[3]').text_content()
             if context_text:
                 comment_phrases = ['curtir', 'comentar', 'responder', 'like', 'reply', 'respond', 'compartilhar', 'share']
                 phrase_count = sum(1 for phrase in comment_phrases if phrase in context_text.lower())
-                
+
                 # Se há muitas palavras de ação, provavelmente é área de comentário
                 if phrase_count >= 3:
                     bot_logger.debug(f"❌ Elemento rejeitado: contexto com muitas ações de comentário ({phrase_count})")
                     return True
         except Exception:
             pass
-        
+
         return False
-        
+
     except Exception:
         return False
 
@@ -1369,3 +1364,4 @@ async def _extract_images(post: Locator):
     except Exception as e:
         bot_logger.debug(f"Erro na extração de imagens: {e}")
         return []
+</replit_final_file>
