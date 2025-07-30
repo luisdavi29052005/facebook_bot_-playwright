@@ -1,5 +1,6 @@
 modules = ["web", "python-3.12"]
-run = "python app.py"
+run = "pip install -r requirements.txt"
+compile = "make"
 
 [nix]
 channel = "stable-25_05"
@@ -22,4 +23,5 @@ localPort = 5000
 externalPort = 80
 
 [deployment]
-run = ["sh", "-c", "python app.py"]
+run = ["sh", "-c", "pip install -r requirements.txt"]
+build = ["sh", "-c", "make"]
