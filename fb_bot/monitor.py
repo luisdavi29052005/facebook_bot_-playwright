@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 async def take_post_screenshot(post: Locator):
     """
-    Tira screenshot do post inteiro para documentação.
+    Tira screenshot do post inteiro usando o article container para evitar comentários.
+    Baseado na estratégia: encontrar message anchor e subir para [role="article"].
 
     Args:
         post: Elemento do post
@@ -34,18 +35,54 @@ async def take_post_screenshot(post: Locator):
         await post.scroll_into_view_if_needed()
         await asyncio.sleep(1)
 
-        # Tirar screenshot do post inteiro
-        screenshot_path = screenshots_dir / f"post_{timestamp}.png"
-        await post.screenshot(path=str(screenshot_path))
+        # ESTRATÉGIA: Usar message anchor para encontrar article correto
+        screenshot_element = post
         
+        try:
+            # Tentar encontrar o message anchor e subir para article
+            message_anchor = post.locator('div[data-ad-rendering-role="story_message"] div[data-ad-preview="message"]').first()
+            
+            if await message_anchor.count() > 0:
+                # Subir para o article container
+                article_handle = await message_anchor.evaluate_handle('el => el.closest("[role=\'article\']")')
+                if article_handle:
+                    screenshot_element = article_handle
+                    bot_logger.debug("📍 Usando article container para screenshot (sem comentários)")
+                else:
+                    bot_logger.debug("⚠️ Article container não encontrado, usando elemento original")
+            else:
+                bot_logger.debug("⚠️ Message anchor não encontrado, usando elemento original")
+                
+        except Exception as e:
+            bot_logger.debug(f"Erro buscando article container: {e}")
+
+        # Ocultar comentários via CSS antes do screenshot
+        try:
+            page = post.page
+            await page.add_style_tag(content="""
+                [aria-label*="oment" i], 
+                [data-testid*="UFI2Comment"],
+                [aria-label*="Escreva um comentário" i],
+                [aria-label*="Write a comment" i] { 
+                    display: none !important; 
+                }
+            """)
+            bot_logger.debug("🚫 Comentários ocultados via CSS")
+        except Exception as e:
+            bot_logger.debug(f"Erro ocultando comentários: {e}")
+
+        # Tirar screenshot do elemento correto
+        screenshot_path = screenshots_dir / f"post_{timestamp}.png"
+        await screenshot_element.screenshot(path=str(screenshot_path))
+
         bot_logger.info(f"📸 Screenshot do post salvo: {screenshot_path}")
 
         # Também salvar HTML para referência
         html_dumps_dir = Path("html_dumps/posts")
         html_dumps_dir.mkdir(parents=True, exist_ok=True)
-        
+
         html_path = html_dumps_dir / f"post_{timestamp}.html"
-        inner_html = await post.inner_html()
+        inner_html = await screenshot_element.inner_html()
 
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(f"""<!DOCTYPE html>
@@ -58,13 +95,21 @@ async def take_post_screenshot(post: Locator):
         .post-info {{ background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
         .post-content {{ background: #fff; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
         .timestamp {{ color: #65676b; font-size: 14px; }}
+        /* Hide comments in HTML dump too */
+        [aria-label*="oment" i], 
+        [data-testid*="UFI2Comment"],
+        [aria-label*="Escreva um comentário" i],
+        [aria-label*="Write a comment" i] {{ 
+            display: none !important; 
+        }}
     </style>
 </head>
 <body>
     <div class="post-info">
-        <h1>📸 Post Capturado</h1>
+        <h1>📸 Post Capturado (Sem Comentários)</h1>
         <p class="timestamp"><strong>Data/Hora:</strong> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
         <p><strong>Arquivo:</strong> {screenshot_path.name}</p>
+        <p><strong>Estratégia:</strong> Article container via message anchor</p>
     </div>
     <div class="post-content">
 {inner_html}
@@ -271,15 +316,15 @@ async def wait_post_ready(post: Locator):
 
         max_skeleton_wait = 15  # 15 segundos máximo para skeleton sumir
         skeleton_gone = False
-        
+
         for attempt in range(max_skeleton_wait):
             skeleton_found = False
-            
+
             for selector in skeleton_selectors:
                 try:
                     skeleton_elements = post.locator(selector)
                     count = await skeleton_elements.count()
-                    
+
                     if count > 0:
                         # Verificar se algum skeleton ainda está visível
                         for i in range(count):
@@ -288,30 +333,30 @@ async def wait_post_ready(post: Locator):
                                 skeleton_found = True
                                 bot_logger.debug(f"⏳ Skeleton ativo encontrado: {selector} (tentativa {attempt + 1})")
                                 break
-                        
+
                         if skeleton_found:
                             break
-                            
+
                 except Exception:
                     continue
-            
+
             if not skeleton_found:
                 skeleton_gone = True
                 bot_logger.debug("✅ Skeletons removidos - post hidratando...")
                 break
-                
+
             await asyncio.sleep(1)
 
         # ETAPA 2: Aguardar autor aparecer (indicador chave)
         author_ready = False
         max_author_wait = 10
-        
+
         for attempt in range(max_author_wait):
             try:
                 # Verificar se há link de autor com texto válido
                 author_links = post.locator('h3 a[role="link"], h2 a[role="link"]')
                 count = await author_links.count()
-                
+
                 for i in range(min(count, 3)):  # Verificar primeiros 3 links
                     try:
                         link = author_links.nth(i)
@@ -326,13 +371,13 @@ async def wait_post_ready(post: Locator):
                                     break
                     except Exception:
                         continue
-                
+
                 if author_ready:
                     break
-                    
+
                 bot_logger.debug(f"⏳ Aguardando autor aparecer (tentativa {attempt + 1})")
                 await asyncio.sleep(1)
-                
+
             except Exception:
                 await asyncio.sleep(1)
 
@@ -340,7 +385,7 @@ async def wait_post_ready(post: Locator):
         try:
             text_elements = post.locator('div[dir="auto"]:visible')
             text_count = await text_elements.count()
-            
+
             if text_count > 0:
                 # Aguardar pelo menos algum texto aparecer
                 for attempt in range(5):
@@ -360,7 +405,7 @@ async def wait_post_ready(post: Locator):
             # Verificar se há imagens e se são reais (não placeholders)
             images = post.locator('img')
             img_count = await images.count()
-            
+
             if img_count > 0:
                 real_images_found = False
                 for attempt in range(5):
@@ -372,11 +417,11 @@ async def wait_post_ready(post: Locator):
                                 if src and ('scontent' in src or 'fbcdn' in src):
                                     real_images_found = True
                                     break
-                        
+
                         if real_images_found:
                             bot_logger.debug("✅ Imagens reais carregadas")
                             break
-                            
+
                         await asyncio.sleep(1)
                     except Exception:
                         await asyncio.sleep(1)
@@ -385,7 +430,7 @@ async def wait_post_ready(post: Locator):
 
         # ETAPA 5: Delay final para garantir renderização CSS completa
         await asyncio.sleep(2)
-        
+
         # Verificação final: se ainda há skeleton visível, aguardar mais um pouco
         try:
             final_skeleton_check = post.locator('[data-visualcompletion="loading-state"]:visible')
@@ -426,12 +471,12 @@ async def is_valid_post(article) -> bool:
             '[data-visualcompletion="loading-state"]',
             '[aria-label="Carregando..." i]'
         ]
-        
+
         for selector in skeleton_selectors:
             try:
                 skeleton_elements = article.locator(selector)
                 count = await skeleton_elements.count()
-                
+
                 if count > 0:
                     # Verificar se algum skeleton está visível
                     for i in range(count):
@@ -863,7 +908,7 @@ async def find_next_valid_post(page: Page) -> Locator:
                 bot_logger.debug(f"Erro ao rolar: {e}")
                 break
 
-        # Buscar posts com cada seletor
+        # Buscar posts com cada selector
         for selector_idx, selector in enumerate(post_selectors):
             try:
                 bot_logger.debug(f"🔍 Tentativa {attempt + 1} - Seletor {selector_idx + 1}: {selector}")
@@ -1109,153 +1154,215 @@ async def extract_post_details(post: Locator):
 
 async def _extract_author(post: Locator) -> str:
     """
-    Extrai autor do post APENAS a partir do elemento timestamp,
-    garantindo que é o autor real do post principal e não de comentários.
+    Extrai autor do post usando os seletores estáveis do Facebook Comet.
+    Baseado na estratégia: achar o message anchor e subir para o article header.
     """
     import re
 
-    # Aguardar elementos carregarem
     try:
-        await post.wait_for_selector('[href*="comment_id"], time, [aria-label*="há"], [aria-label*="ago"]', timeout=3000)
-    except Exception:
-        pass
-
-    # ESTRATÉGIA PRINCIPAL: Encontrar o timestamp primeiro e buscar o autor adjacente
-    # O timestamp é o indicador mais confiável de onde está o header do post
-    timestamp_selectors = [
-        'a[href*="comment_id"]',  # Link do timestamp (mais comum)
-        'time[datetime]',
-        'a[href*="story_fbid"]',
-        'span:regex("^\\d+\\s*(min|h|d|dia|dias|hora|horas)$")',
-        '[aria-label*="há"]',
-        '[aria-label*="ago"]'
-    ]
-
-    for ts_selector in timestamp_selectors:
-        try:
-            timestamp_elements = post.locator(ts_selector)
-            ts_count = await timestamp_elements.count()
-
-            for ts_idx in range(min(ts_count, 3)):  # Verificar primeiros 3 timestamps
-                try:
-                    timestamp_elem = timestamp_elements.nth(ts_idx)
-
-                    if not await timestamp_elem.is_visible():
-                        continue
-
-                    # Verificar se é um timestamp válido
-                    ts_text = await timestamp_elem.text_content()
-                    if not ts_text or not _is_valid_timestamp(ts_text.strip()):
-                        continue
-
-                    bot_logger.debug(f"🕒 Timestamp encontrado: '{ts_text.strip()}' - buscando autor adjacente...")
-
-                    # BUSCAR AUTOR NO MESMO CONTAINER/NIVEL DO TIMESTAMP
-                    # Estratégias de busca a partir do timestamp
-                    author_search_strategies = [
-                        # Mesmo container, buscar span/strong anterior
-                        'xpath=ancestor::*[1]//a[@role="link"]//span[@dir="auto"]',
-                        'xpath=ancestor::*[1]//strong',
-                        'xpath=ancestor::*[1]//span[@dir="auto"]',
-
-                        # Container pai, buscar h3 com autor
-                        'xpath=ancestor::*[2]//h3//a[@role="link"]//span[@dir="auto"]',
-                        'xpath=ancestor::*[2]//h3//strong',
-
-                        # Ir para container do header do post
-                        'xpath=ancestor::*[3]//h3//a[@role="link"]//span[@dir="auto"]',
-                        'xpath=ancestor::*[3]//h3//strong',
-
-                        # Buscar elementos de autor que precedem o timestamp
-                        'xpath=preceding::a[@role="link"]//span[@dir="auto"][1]',
-                        'xpath=preceding::strong[1]'
-                    ]
-
-                    for search_strategy in author_search_strategies:
-                        try:
-                            author_candidates = timestamp_elem.locator(search_strategy)
-                            auth_count = await author_candidates.count()
-
-                            for auth_idx in range(min(auth_count, 3)):
-                                try:
-                                    author_elem = author_candidates.nth(auth_idx)
-
-                                    if not await author_elem.is_visible():
-                                        continue
-
-                                    author_text = (await author_elem.inner_text() or "").strip()
-
-                                    if not author_text:
-                                        continue
-
-                                    # Limpar nome (remover separadores)
-                                    clean_name = author_text.split('·')[0].split('•')[0].split('\n')[0].strip()
-
-                                    # Validar se é um nome de pessoa válido
-                                    if await _is_valid_author_name(clean_name, author_elem):
-                                        # Verificar proximidade ao timestamp (deve estar próximo)
-                                        if await _is_author_near_timestamp(author_elem, timestamp_elem):
-                                            bot_logger.success(f"✅ AUTOR ENCONTRADO: '{clean_name}' (próximo ao timestamp: '{ts_text.strip()}')")
-                                            return clean_name
-
-                                except Exception as e:
-                                    bot_logger.debug(f"Erro verificando candidato a autor {auth_idx}: {e}")
-                                    continue
-
-                        except Exception as e:
-                            bot_logger.debug(f"Erro na estratégia '{search_strategy}': {e}")
-                            continue
-
-                except Exception as e:
-                    bot_logger.debug(f"Erro processando timestamp {ts_idx}: {e}")
-                    continue
-
-        except Exception as e:
-            bot_logger.debug(f"Erro na busca de timestamp '{ts_selector}': {e}")
-            continue
-
-    # FALLBACK: Buscar autor no primeiro h3 visível do post (sem comentários)
-    try:
-        bot_logger.debug("🔍 Fallback: buscando primeiro h3 do post...")
-
-        first_h3_strategies = [
-            'h3:first-of-type a[role="link"] span[dir="auto"]',
-            'h3:first-of-type strong',
-            'h3:first-of-type span[dir="auto"]:first-child'
-        ]
-
-        for h3_strategy in first_h3_strategies:
-            try:
-                h3_elements = post.locator(h3_strategy)
-                h3_count = await h3_elements.count()
-
-                for i in range(min(h3_count, 2)):
+        # ESTRATÉGIA 1: Usar o anchor message estável do Comet
+        # div[data-ad-rendering-role="story_message"] > div[data-ad-preview="message"]
+        
+        # Primeiro, tentar encontrar o message anchor
+        message_anchor = post.locator('div[data-ad-rendering-role="story_message"] div[data-ad-preview="message"]').first()
+        
+        if await message_anchor.count() > 0:
+            bot_logger.debug("📍 Message anchor encontrado - buscando autor no header...")
+            
+            # Subir para o article container
+            article_container = await message_anchor.evaluate_handle('el => el.closest("[role=\'article\']")')
+            
+            if article_container:
+                # Buscar autor no header do article usando seletores robustos
+                author_strategies = [
+                    # Estratégia principal: primeiro link com role=link, não-avatar, sem timestamp
+                    'h3 a[role="link"][aria-hidden="false"]',
+                    'h2 a[role="link"][aria-hidden="false"]', 
+                    'strong a[role="link"][aria-hidden="false"]',
+                    'div[role="heading"] a[role="link"][aria-hidden="false"]'
+                ]
+                
+                for strategy in author_strategies:
                     try:
-                        h3_elem = h3_elements.nth(i)
-
-                        if not await h3_elem.is_visible():
-                            continue
-
-                        h3_text = (await h3_elem.inner_text() or "").strip()
-                        clean_name = h3_text.split('·')[0].split('•')[0].split('\n')[0].strip()
-
-                        if await _is_valid_author_name(clean_name, h3_elem):
-                            # Verificar se não está em área de comentários
-                            if not await _is_inside_comment_section(h3_elem):
-                                bot_logger.debug(f"✅ Autor encontrado no fallback h3: '{clean_name}'")
-                                return clean_name
-
-                    except Exception:
+                        author_links = article_container.locator(strategy)
+                        count = await author_links.count()
+                        
+                        for i in range(min(count, 3)):  # Verificar primeiros 3 links
+                            try:
+                                link = author_links.nth(i)
+                                
+                                if not await link.is_visible():
+                                    continue
+                                
+                                # Verificar se não contém timestamp
+                                has_time = await link.locator('time').count() > 0
+                                if has_time:
+                                    continue
+                                
+                                # Extrair nome
+                                name = (await link.inner_text() or "").strip()
+                                href = await link.get_attribute("href") or ""
+                                
+                                if name and len(name) >= 3:
+                                    # Validar se é um nome válido e href parece de perfil
+                                    if await _is_valid_author_name(name, link) and _looks_like_profile_href(href):
+                                        bot_logger.success(f"✅ AUTOR ENCONTRADO via message anchor: '{name}'")
+                                        return name
+                                        
+                            except Exception as e:
+                                bot_logger.debug(f"Erro verificando link {i}: {e}")
+                                continue
+                                
+                    except Exception as e:
+                        bot_logger.debug(f"Erro na estratégia '{strategy}': {e}")
                         continue
+                        
+        # ESTRATÉGIA 2: Heurística JavaScript para filtrar autor mais robusto
+        try:
+            bot_logger.debug("🔍 Usando heurística JavaScript para encontrar autor...")
+            
+            author_data = await post.evaluate("""
+                (root) => {
+                    const anchors = Array.from(root.querySelectorAll('a[role="link"]'));
+                    const getText = el => (el.innerText || el.textContent || '').trim();
+                    
+                    // Regex para reconhecer href de perfil
+                    const isProfileHref = href => /(?:\/groups\/\d+\/user\/\d+\/|\/people\/[^/]+\/\d+\/|profile\.php\?id=\d+|\/[A-Za-z0-9._-]{3,}\/?$)/.test(href || '');
+                    
+                    // Primeira tentativa: links com href de perfil, sem timestamp, não-avatar
+                    for (const a of anchors) {
+                        const href = a.getAttribute('href') || '';
+                        const text = getText(a);
+                        const hasTime = !!a.querySelector('time');
+                        const ariaHidden = a.getAttribute('aria-hidden') === 'true';
+                        
+                        if (text && !hasTime && !ariaHidden && isProfileHref(href)) {
+                            return { text, href, strategy: 'profile_href' };
+                        }
+                    }
+                    
+                    // Segunda tentativa: qualquer link com texto, sem timestamp, não-avatar
+                    for (const a of anchors) {
+                        const text = getText(a);
+                        const hasTime = !!a.querySelector('time');
+                        const ariaHidden = a.getAttribute('aria-hidden') === 'true';
+                        
+                        if (text && !hasTime && !ariaHidden && text.length >= 3) {
+                            return { text, href: a.getAttribute('href') || '', strategy: 'fallback' };
+                        }
+                    }
+                    
+                    return null;
+                }
+            """)
+            
+            if author_data and author_data.get("text"):
+                name = author_data["text"].strip()
+                strategy = author_data.get("strategy", "unknown")
+                
+                if await _is_valid_author_name_text(name):
+                    bot_logger.success(f"✅ AUTOR ENCONTRADO via heurística ({strategy}): '{name}'")
+                    return name
+                    
+        except Exception as e:
+            bot_logger.debug(f"Erro na heurística JavaScript: {e}")
 
-            except Exception:
-                continue
+        # ESTRATÉGIA 3: Fallback com primeiro h3 válido
+        try:
+            bot_logger.debug("🔍 Fallback: buscando primeiro h3 do post...")
+            
+            h3_elements = post.locator('h3 a[role="link"]').first()
+            if await h3_elements.count() > 0:
+                name = (await h3_elements.inner_text() or "").strip()
+                
+                # Limpar nome de separadores
+                clean_name = name.split('·')[0].split('•')[0].split('\n')[0].strip()
+                
+                if await _is_valid_author_name_text(clean_name):
+                    # Verificar se não está em seção de comentários
+                    if not await _is_inside_comment_section(h3_elements):
+                        bot_logger.debug(f"✅ Autor encontrado no fallback h3: '{clean_name}'")
+                        return clean_name
+                        
+        except Exception as e:
+            bot_logger.debug(f"Erro no fallback h3: {e}")
 
     except Exception as e:
-        bot_logger.debug(f"Erro no fallback h3: {e}")
+        bot_logger.error(f"Erro crítico na extração de autor: {e}")
 
     bot_logger.warning("❌ AUTOR NÃO ENCONTRADO - nenhuma estratégia funcionou")
     return ""
+
+def _looks_like_profile_href(href: str) -> bool:
+    """Verifica se o href parece ser de um perfil de usuário."""
+    if not href:
+        return False
+        
+    import re
+    profile_patterns = [
+        r'/groups/\d+/user/\d+/',
+        r'/people/[^/]+/\d+/',
+        r'profile\.php\?id=\d+',
+        r'/[A-Za-z0-9._-]{3,}/?$'
+    ]
+    
+    return any(re.search(pattern, href) for pattern in profile_patterns)
+
+async def _is_valid_author_name_text(name: str) -> bool:
+    """Valida se o texto extraído é um nome de autor válido."""
+    import re
+    
+    if not name or len(name) < 2:
+        return False
+    
+    # Muito longo para ser nome
+    if len(name) > 100:
+        return False
+    
+    # Filtrar skeleton indicators
+    skeleton_patterns = [
+        r'^[\-\•\·\s]+$',  # Apenas símbolos de skeleton
+        r'^[•]{2,}$',      # Múltiplos pontos
+        r'^[\-]{2,}$',     # Múltiplos hífens
+        r'^\s*loading\s*$', # Texto "loading"
+        r'^\s*carregando\s*$', # Texto "carregando"
+        r'^placeholder',    # Começando com "placeholder"
+    ]
+    
+    name_lower = name.lower().strip()
+    for pattern in skeleton_patterns:
+        if re.match(pattern, name_lower):
+            return False
+    
+    # Contém apenas letras, espaços, hífens e acentos
+    if not re.match(r'^[A-Za-zÀ-ÿ\s\-\.\']+$', name):
+        return False
+    
+    # Filtrar termos de UI
+    ui_terms = [
+        'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar',
+        'responder', 'reply', 'ver mais', 'see more', 'seguir', 'follow',
+        'há', 'ago', 'min', 'hora', 'day', 'yesterday', 'ontem', 'h', 'd',
+        'curtida', 'curtidas', 'reagir', 'react', 'reaction', 'reação'
+    ]
+    
+    if any(term in name_lower for term in ui_terms):
+        return False
+    
+    # Não pode ser timestamp
+    if re.match(r'^\d+\s*(min|h|d|hora|horas|dia|dias)', name_lower):
+        return False
+    
+    # Deve ter pelo menos uma letra
+    if not re.search(r'[A-Za-zÀ-ÿ]', name):
+        return False
+    
+    # Deve ter pelo menos 3 caracteres alfabéticos
+    alpha_count = sum(1 for c in name if c.isalpha())
+    if alpha_count < 3:
+        return False
+    
+    return True
 
 def _is_valid_timestamp(text: str) -> bool:
     """Valida se o texto parece um timestamp válido."""
@@ -1318,7 +1425,7 @@ async def _is_valid_author_name(name: str, elem: Locator) -> bool:
         r'^\s*carregando\s*$', # Texto "carregando"
         r'^placeholder',    # Começando com "placeholder"
     ]
-    
+
     name_lower = name.lower().strip()
     for pattern in skeleton_patterns:
         if re.match(pattern, name_lower):
@@ -1441,76 +1548,135 @@ async def _is_inside_comment_section(elem: Locator) -> bool:
         return False
 
 async def _extract_text(post: Locator) -> str:
-    """Extrai texto do post usando inner_text e filtragem melhorada."""
+    """
+    Extrai texto do post usando o seletor estável do Facebook Comet.
+    Prioriza div[data-ad-preview="message"] como anchor point.
+    """
 
-    # Primeiro, tentar expandir texto
     try:
-        see_more_selectors = [
-            'div[role="button"]:has-text("Ver mais")',
-            'div[role="button"]:has-text("See more")',
-            '*[role="button"]:has-text("Ver mais")',
-            '*[role="button"]:has-text("See more")'
-        ]
-
-        for selector in see_more_selectors:
+        # ESTRATÉGIA 1: Usar o seletor estável do Comet
+        # div[data-ad-rendering-role="story_message"] > div[data-ad-preview="message"]
+        message_container = post.locator('div[data-ad-rendering-role="story_message"] div[data-ad-preview="message"]').first()
+        
+        if await message_container.count() > 0:
+            bot_logger.debug("📍 Message container encontrado - extraindo texto...")
+            
+            # Primeiro, tentar expandir "Ver mais" se houver
             try:
-                see_more_button = post.locator(selector).first()
-                if await see_more_button.count() > 0 and await see_more_button.is_visible():
-                    await see_more_button.click()
-                    await asyncio.sleep(2)
-                    break
+                see_more_selectors = [
+                    'div[role="button"]:has-text("Ver mais")',
+                    'div[role="button"]:has-text("See more")',
+                    '*[role="button"]:has-text("Ver mais")',
+                    '*[role="button"]:has-text("See more")'
+                ]
+
+                for selector in see_more_selectors:
+                    try:
+                        see_more_button = message_container.locator(selector).first()
+                        if await see_more_button.count() > 0 and await see_more_button.is_visible():
+                            await see_more_button.click()
+                            await asyncio.sleep(2)
+                            bot_logger.debug("✅ Texto expandido com 'Ver mais'")
+                            break
+                    except Exception:
+                        continue
             except Exception:
-                continue
+                bot_logger.debug("Erro ao expandir texto")
 
-    except Exception:
-        bot_logger.debug("Erro ao expandir texto")
+            # Extrair texto do message container
+            try:
+                message_text = (await message_container.inner_text() or "").strip()
+                
+                if message_text:
+                    # Filtrar e limpar texto
+                    lines = message_text.split('\n')
+                    valid_lines = []
 
-    # Extrair texto usando inner_text em elementos principais
-    try:
+                    for line in lines:
+                        line_clean = line.strip()
+                        if (len(line_clean) > 5 and  # Mínimo 5 caracteres
+                            re.search(r'[A-Za-zÀ-ÿ]', line_clean) and  # Contém letras
+                            not any(ui_term in line_clean.lower() for ui_term in [
+                                'ver mais', 'see more', 'ver tradução', 'see translation',
+                                'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar',
+                                'reagir', 'react', 'responder', 'reply'
+                            ])):
+                            valid_lines.append(line_clean)
+
+                    if valid_lines:
+                        combined_text = '\n'.join(valid_lines)
+                        combined_text = re.sub(r'\n{3,}', '\n\n', combined_text)  # Normalizar quebras
+                        combined_text = combined_text.strip()
+
+                        if len(combined_text) >= 8:
+                            bot_logger.success(f"✅ Texto extraído via message container: {len(combined_text)} chars")
+                            return combined_text
+                            
+            except Exception as e:
+                bot_logger.debug(f"Erro extraindo texto do message container: {e}")
+
+        # ESTRATÉGIA 2: Fallback com div[dir="auto"] visíveis
+        bot_logger.debug("🔍 Fallback: buscando em div[dir='auto']...")
+        
         text_elements = post.locator('div[dir="auto"]:visible')
         all_texts = []
 
         count = await text_elements.count()
-        for i in range(count):
-            elem = text_elements.nth(i)
+        for i in range(min(count, 10)):  # Limitar para performance
             try:
-                if await elem.is_visible():
-                    # Usar inner_text para melhor extração
-                    text = (await elem.inner_text() or "").strip()
-                    if text and len(text) > 10:  # Linhas com mais de 10 caracteres
-                        # Filtrar linhas de UI
-                        lines = text.split('\n')
-                        valid_lines = []
+                elem = text_elements.nth(i)
+                
+                if not await elem.is_visible():
+                    continue
+                
+                # Usar inner_text para melhor extração
+                text = (await elem.inner_text() or "").strip()
+                
+                if text and len(text) > 10:  # Linhas com mais de 10 caracteres
+                    # Filtrar linhas de UI
+                    lines = text.split('\n')
+                    valid_lines = []
 
-                        for line in lines:
-                            line_clean = line.strip()
-                            if (len(line_clean) > 10 and
-                                re.search(r'[A-Za-zÀ-ÿ]', line_clean) and  # Contém letras
-                                not any(ui_term in line_clean.lower() for ui_term in [
-                                    'ver mais', 'see more', 'ver tradução', 'see translation',
-                                    'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar'
-                                ])):
-                                valid_lines.append(line_clean)
+                    for line in lines:
+                        line_clean = line.strip()
+                        if (len(line_clean) > 10 and
+                            re.search(r'[A-Za-zÀ-ÿ]', line_clean) and  # Contém letras
+                            not any(ui_term in line_clean.lower() for ui_term in [
+                                'ver mais', 'see more', 'ver tradução', 'see translation',
+                                'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar',
+                                'reagir', 'react', 'responder', 'reply', 'seguir', 'follow'
+                            ])):
+                            valid_lines.append(line_clean)
 
-                        if valid_lines:
-                            all_texts.extend(valid_lines)
+                    if valid_lines:
+                        all_texts.extend(valid_lines)
 
             except Exception:
                 continue
 
         if all_texts:
-            # Juntar textos válidos
-            combined_text = '\n'.join(all_texts)
+            # Juntar textos válidos e remover duplicatas
+            seen_lines = set()
+            unique_lines = []
+            
+            for line in all_texts:
+                line_lower = line.lower()
+                if line_lower not in seen_lines and len(line) > 5:
+                    seen_lines.add(line_lower)
+                    unique_lines.append(line)
+
+            combined_text = '\n'.join(unique_lines)
             combined_text = re.sub(r'\n{3,}', '\n\n', combined_text)  # Normalizar quebras
             combined_text = combined_text.strip()
 
             if len(combined_text) >= 8:
-                bot_logger.debug(f"Texto extraído: {len(combined_text)} chars")
+                bot_logger.debug(f"✅ Texto extraído via fallback: {len(combined_text)} chars")
                 return combined_text
 
     except Exception as e:
-        bot_logger.debug(f"Erro na extração de texto: {e}")
+        bot_logger.error(f"Erro crítico na extração de texto: {e}")
 
+    bot_logger.debug("❌ Nenhum texto extraído")
     return ""
 
 async def _extract_images(post: Locator):
@@ -1604,3 +1770,91 @@ async def post_has_video(post: Locator) -> bool:
         return False
     except Exception:
         return False
+
+
+async def find_next_unprocessed_post(page: Page, processed_keys: set) -> Optional[Locator]:
+    """
+    Encontra o próximo post não processado na página.
+    
+    Args:
+        page: Página do Playwright
+        processed_keys: Conjunto de chaves de posts já processados
+        
+    Returns:
+        Locator do próximo post não processado ou None se não encontrou
+    """
+    bot_logger.debug(f"🔍 Buscando post não processado... ({len(processed_keys)} já processados)")
+    
+    try:
+        # Buscar posts válidos na página
+        post_element = await find_next_valid_post(page)
+        
+        if not post_element:
+            return None
+            
+        # Gerar chave única do post
+        post_key = await infer_post_key(post_element)
+        
+        # Verificar se já foi processado
+        if post_key in processed_keys:
+            bot_logger.debug(f"Post já processado: {post_key[:30]}...")
+            return None
+            
+        bot_logger.debug(f"✅ Post não processado encontrado: {post_key[:30]}...")
+        return post_element
+        
+    except Exception as e:
+        bot_logger.error(f"Erro ao buscar post não processado: {e}")
+        return None
+
+
+async def infer_post_key(post_element: Locator) -> str:
+    """
+    Gera uma chave única para o post baseada em múltiplos fatores.
+    
+    Args:
+        post_element: Elemento do post
+        
+    Returns:
+        Chave única do post
+    """
+    try:
+        # Estratégia 1: Tentar extrair ID do post primeiro
+        post_id = await extract_post_id(post_element)
+        if post_id and post_id != "unknown":
+            return post_id
+            
+        # Estratégia 2: Criar chave baseada em conteúdo
+        text_content = await post_element.text_content() or ""
+        
+        # Pegar primeiras palavras significativas
+        words = []
+        for word in text_content.split():
+            if len(word) > 3 and word.isalpha():
+                words.append(word.lower())
+            if len(words) >= 5:
+                break
+                
+        # Obter posição do elemento
+        try:
+            bbox = await post_element.bounding_box()
+            position = f"{int(bbox['x'])}_{int(bbox['y'])}" if bbox else "0_0"
+        except Exception:
+            position = "0_0"
+            
+        # Criar chave única
+        content_key = "_".join(words) if words else "no_text"
+        unique_string = f"{content_key}_{position}_{len(text_content)}"
+        
+        # Hash para garantir tamanho consistente
+        import hashlib
+        post_hash = hashlib.md5(unique_string.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        
+        return f"inferred:{post_hash}"
+        
+    except Exception as e:
+        bot_logger.debug(f"Erro ao inferir chave do post: {e}")
+        # Fallback: timestamp atual
+        from datetime import datetime
+        fallback_key = f"fallback_{int(datetime.now().timestamp())}"
+        return fallback_key
