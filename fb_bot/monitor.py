@@ -15,46 +15,59 @@ from .selectors import FacebookSelectors
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def take_post_screenshot(post: Locator):
+async def process_post(post: Locator, n8n_webhook_url: str) -> Dict[str, Any]:
     """
-    Tira screenshot do post inteiro usando o article container para evitar comentários.
-    Baseado na estratégia: encontrar message anchor e subir para [role="article"].
+    Processa um post específico, tirando uma captura de tela e enviando para n8n.
 
     Args:
-        post: Elemento do post
+        post: Locator do post.
+        n8n_webhook_url: URL do webhook n8n para processamento.
+
+    Returns:
+        Dicionário com informações do post, como autor e texto.
     """
-    try:
-        # Criar timestamp único
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    # Tirar screenshot do post inteiro
+    screenshot_path = await take_post_screenshot(post)
+    
+    # Gerar ID único do post
+    post_id = await extract_post_id(post)
 
-        # Criar diretório de screenshots se não existir
-        screenshots_dir = Path("screenshots/posts")
-        screenshots_dir.mkdir(parents=True, exist_ok=True)
+    # Inicializar variáveis
+    author = ""
+    text = ""
 
-        # Rolar até o post para garantir que está visível
-        await post.scroll_into_view_if_needed()
-        await asyncio.sleep(1)
-
-        # ESTRATÉGIA: Usar message anchor para encontrar article correto
-        screenshot_element = post
+    # Processar via n8n (obrigatório agora)
+    if n8n_webhook_url and screenshot_path:
+        bot_logger.info("🤖 Processando post via n8n com IA...")
         
-        try:
-            # Tentar encontrar o message anchor e subir para article
-            message_anchor = post.locator('div[data-ad-rendering-role="story_message"] div[data-ad-preview="message"]').first()
-            
-            if await message_anchor.count() > 0:
-                # Subir para o article container
-                article_handle = await message_anchor.evaluate_handle('el => el.closest("[role=\'article\']")')
-                if article_handle:
-                    screenshot_element = article_handle
-                    bot_logger.debug("📍 Usando article container para screenshot (sem comentários)")
-                else:
-                    bot_logger.debug("⚠️ Article container não encontrado, usando elemento original")
-            else:
-                bot_logger.debug("⚠️ Message anchor não encontrado, usando elemento original")
-                
-        except Exception as e:
-            bot_logger.debug(f"Erro buscando article container: {e}")
+        from .n8n_client import process_screenshot_with_n8n
+        
+        n8n_result = await process_screenshot_with_n8n(n8n_webhook_url, screenshot_path, post_id)
+        
+        if n8n_result:
+            author = n8n_result.get('author', '')
+            text = n8n_result.get('text', '')
+            bot_logger.success(f"✅ Post processado via n8n - Autor: '{author}', Texto: {len(text)} chars")
+        else:
+            bot_logger.warning("⚠️ n8n não conseguiu processar - post será ignorado")
+            return {
+                "author": "",
+                "text": "",
+                "image_url": "",
+                "images_extra": [],
+                "has_video": False
+            }
+    else:
+        bot_logger.error("❌ n8n não configurado ou screenshot falhou - post será ignorado")
+
+    # Retornar os dados processados
+    return {
+        "author": author,
+        "text": text,
+        "image_url": screenshot_path,
+        "images_extra": [],
+        "has_video": False
+    }
 
         # Ocultar comentários via CSS antes do screenshot
         try:
@@ -75,7 +88,11 @@ async def take_post_screenshot(post: Locator):
         screenshot_path = screenshots_dir / f"post_{timestamp}.png"
         await screenshot_element.screenshot(path=str(screenshot_path))
 
-        bot_logger.info(f"📸 Screenshot do post salvo: {screenshot_path}")
+        bot_logger.success(f"📸 Screenshot do post salvo: {screenshot_path}")
+        print(f"DEBUG: Screenshot salvo em: {screenshot_path}")  # Debug temporário
+
+        # Retornar caminho do screenshot
+        screenshot_result = str(screenshot_path)
 
         # Também salvar HTML para referência
         html_dumps_dir = Path("html_dumps/posts")
@@ -119,8 +136,11 @@ async def take_post_screenshot(post: Locator):
 
         bot_logger.debug(f"HTML do post salvo: {html_path}")
 
+        return screenshot_result
+
     except Exception as e:
         bot_logger.warning(f"Erro ao tirar screenshot do post: {e}")
+        return ""
 
 async def debug_dump_article(article: Locator, tag: str):
     """
@@ -954,135 +974,16 @@ async def find_next_valid_post(page: Page) -> Locator:
     bot_logger.warning("❌ Nenhum post válido encontrado após busca completa")
     return None
 
-async def extract_post_id(post_element: Locator):
-    """
-    Extrai ID único do post usando múltiplas estratégias.
-    Corrigido para não depender de funções inexistentes.
-    """
-    try:
-        # Estratégia 1: Links de permalink/timestamp
-        link_selectors = [
-            "a[href*='/posts/']",
-            "a[href*='/permalink/']", 
-            "a[href*='/story.php']",
-            "a[href*='story_fbid']",
-            "time[datetime] a",  # Link no timestamp
-            "span[id*='feed_subtitle'] a"  # Link no subtítulo
-        ]
 
-        for selector in link_selectors:
-            try:
-                links = post_element.locator(selector)
-                count = await links.count()
 
-                for i in range(count):
-                    link = links.nth(i)
-                    href = await link.get_attribute("href")
-
-                    if href and href.strip():
-                        # Limpar URL
-                        clean_href = href.split("?")[0].split("#")[0]
-
-                        # Verificar se é permalink válido
-                        permalink_patterns = ['/posts/', '/permalink/', 'story_fbid', '/p/']
-                        if any(pattern in clean_href for pattern in permalink_patterns):
-                            return f"permalink:{clean_href}"
-
-            except Exception:
-                continue
-
-    except Exception:
-        pass
-
-    # Estratégia 2: Atributos de dados únicos
-    try:
-        data_attrs = [
-            'data-ft', 'data-testid', 'id', 'data-story-id',
-            'data-pagelet', 'data-tn', 'data-feed-story-id'
-        ]
-
-        for attr in data_attrs:
-            try:
-                value = await post_element.get_attribute(attr)
-                if value and value.strip() and len(value) > 3:
-                    return f"attr:{attr}:{value[:50]}"  # Limitar tamanho
-            except Exception:
-                continue
-
-    except Exception:
-        pass
-
-    # Estratégia 3: Timestamp + posição
-    try:
-        # Buscar timestamp no post
-        timestamp = ""
-        time_selectors = [
-            "time[datetime]",
-            "span[class*='timestamp']",
-            "a[href*='story_fbid'] span",
-            "[data-tooltip-content*='ago'], [data-tooltip-content*='há']"
-        ]
-
-        for selector in time_selectors:
-            try:
-                time_elem = post_element.locator(selector).first()
-                if await time_elem.count() > 0:
-                    # Tentar pegar datetime primeiro
-                    datetime_attr = await time_elem.get_attribute("datetime")
-                    if datetime_attr:
-                        timestamp = datetime_attr
-                        break
-
-                    # Senão, pegar texto
-                    text = await time_elem.text_content()
-                    if text and len(text.strip()) > 0:
-                        timestamp = text.strip()
-                        break
-
-            except Exception:
-                continue
-
-        # Obter posição do elemento
-        bbox = await post_element.bounding_box()
-        position = f"{bbox['x']}_{bbox['y']}" if bbox else "0_0"
-
-        # Obter snippet do texto para diferenciação
-        text_content = await post_element.text_content() or ""
-        text_snippet = text_content[:100].replace('\n', ' ').strip()
-
-        # Criar hash único baseado em múltiplos fatores
-        unique_string = f"{timestamp}_{position}_{text_snippet}"
-        post_hash = hashlib.md5(unique_string.encode("utf-8", errors="ignore")).hexdigest()[:12]
-
-        return f"hash:{post_hash}"
-
-    except Exception:
-        pass
-
-    # Estratégia 4: Fallback usando texto + índice
-    try:
-        text_content = await post_element.text_content() or ""
-        if text_content.strip():
-            # Usar primeiras palavras + timestamp atual como fallback
-            words = text_content.split()[:5]
-            text_key = "_".join(words).replace('\n', '')[:50]
-            fallback_hash = hashlib.md5(f"{text_key}_{datetime.now().isoformat()}".encode()).hexdigest()[:8]
-            return f"fallback:{fallback_hash}"
-    except Exception:
-        pass
-
-    # Se tudo falhar, gerar ID único baseado em timestamp
-    fallback_id = f"unknown_{int(datetime.now().timestamp())}"
-    return fallback_id
-
-async def extract_post_details(post: Locator):
-    """Extrai detalhes do post com validação limpa."""
+async def extract_post_details(post: Locator, n8n_webhook_url: str = ""):
+    """Extrai detalhes do post usando apenas n8n para autor/texto."""
     bot_logger.debug("Extraindo detalhes do post")
 
-    # Aguardar post estar pronto com novas validações
+    # Aguardar post estar pronto
     await wait_post_ready(post)
 
-    # Verificação final se é post válido
+    # Verificação se é post válido
     if not await is_valid_post(post):
         bot_logger.warning("Post inválido detectado na extração - pulando")
         return {
@@ -1093,24 +994,48 @@ async def extract_post_details(post: Locator):
             "has_video": False
         }
 
-    # NOVO: Tirar screenshot do post inteiro
-    await take_post_screenshot(post)
+    # Tirar screenshot do post inteiro
+    screenshot_path = await take_post_screenshot(post)
+    
+    # Gerar ID único do post
+    post_id = await extract_post_id(post)
 
-    # Text expansion is now handled within _extract_text function
+    # Inicializar variáveis
+    author = ""
+    text = ""
 
-    # Extrair autor
-    author = await _extract_author(post)
-    if not author.strip():
-        bot_logger.warning("Autor não encontrado - criando debug dump")
-        await debug_dump_article(post, "missing_author")
+    # Processar via n8n (obrigatório agora)
+    if n8n_webhook_url and screenshot_path:
+        bot_logger.info("🤖 Processando post via n8n com IA...")
+        
+        from .n8n_client import process_screenshot_with_n8n
+        
+        n8n_result = await process_screenshot_with_n8n(n8n_webhook_url, screenshot_path, post_id)
+        
+        if n8n_result:
+            author = n8n_result.get('author', '')
+            text = n8n_result.get('text', '')
+            bot_logger.success(f"✅ Post processado via n8n - Autor: '{author}', Texto: {len(text)} chars")
+        else:
+            bot_logger.warning("⚠️ n8n não conseguiu processar - post será ignorado")
+            return {
+                "author": "",
+                "text": "",
+                "image_url": "",
+                "images_extra": [],
+                "has_video": False
+            }
+    else:
+        bot_logger.error("❌ n8n não configurado ou screenshot falhou - post será ignorado")
+        return {
+            "author": "",
+            "text": "",
+            "image_url": "",
+            "images_extra": [],
+            "has_video": False
+        }
 
-    # Extrair texto
-    text = await _extract_text(post)
-    if not text.strip():
-        bot_logger.warning("Texto não encontrado - criando debug dump")
-        await debug_dump_article(post, "missing_text")
-
-    # Extrair imagens
+    # Extrair imagens para complementar
     images = await _extract_images(post)
 
     # Verificar se há vídeo no post
@@ -1118,29 +1043,9 @@ async def extract_post_details(post: Locator):
     if contains_video:
         bot_logger.debug("Post contém vídeo; marcando como conteúdo visual")
 
-    if not images and not contains_video:
-        bot_logger.warning("Imagens não encontradas - criando debug dump")
-        await debug_dump_article(post, "missing_images")
-
-    # Manter compatibilidade: primeira imagem como principal
+    # Primeira imagem como principal
     image_url = images[0] if images else ("[vídeo]" if contains_video else "")
     images_extra = images[1:] if len(images) > 1 else []
-
-    # Log adicional para debug se post parece vazio
-    if not text.strip() and not image_url.strip():
-        try:
-            # Salvar HTML do post problemático
-            html_content = await post.inner_html()
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            debug_file = Path(f"debug_dumps/empty_post_{timestamp}.html")
-            debug_file.parent.mkdir(exist_ok=True)
-
-            with open(debug_file, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-
-            bot_logger.warning(f"Post vazio detectado - HTML salvo em {debug_file}")
-        except Exception as e:
-            bot_logger.debug(f"Erro ao salvar debug do post vazio: {e}")
 
     bot_logger.debug(f"Extração: autor='{author}', texto={len(text)} chars, imagens={len(images)}, vídeo={contains_video}")
 
@@ -1227,7 +1132,7 @@ async def _extract_author(post: Locator) -> str:
                     const getText = el => (el.innerText || el.textContent || '').trim();
                     
                     // Regex para reconhecer href de perfil
-                    const isProfileHref = href => /(?:\/groups\/\d+\/user\/\d+\/|\/people\/[^/]+\/\d+\/|profile\.php\?id=\d+|\/[A-Za-z0-9._-]{3,}\/?$)/.test(href || '');
+                    const isProfileHref = href => /(?:\\/groups\\/\\d+\\/user\\/\\d+\\/|\\/people\\/[^/]+\\/\\d+\\/|profile\\.php\\?id=\\d+|\\/[A-Za-z0-9._-]{3,}\\/?$)/.test(href || '');
                     
                     // Primeira tentativa: links com href de perfil, sem timestamp, não-avatar
                     for (const a of anchors) {
@@ -1770,6 +1675,109 @@ async def post_has_video(post: Locator) -> bool:
         return False
     except Exception:
         return False
+
+
+async def extract_post_id(post_element: Locator) -> str:
+    """
+    Extrai ID único do post baseado em múltiplos indicadores.
+    
+    Args:
+        post_element: Elemento do post
+        
+    Returns:
+        ID único do post ou "unknown" se não conseguir extrair
+    """
+    try:
+        # Estratégia 1: Tentar extrair de URLs de permalink
+        try:
+            permalink_links = post_element.locator('a[href*="story_fbid"], a[href*="posts/"], a[href*="permalink/"]')
+            count = await permalink_links.count()
+            
+            for i in range(min(count, 3)):
+                link = permalink_links.nth(i)
+                href = await link.get_attribute("href")
+                if href:
+                    # Extrair ID da URL
+                    import re
+                    
+                    # Pattern para story_fbid
+                    story_match = re.search(r'story_fbid=(\d+)', href)
+                    if story_match:
+                        return f"story_{story_match.group(1)}"
+                    
+                    # Pattern para posts/
+                    posts_match = re.search(r'/posts/(\d+)', href)
+                    if posts_match:
+                        return f"post_{posts_match.group(1)}"
+                    
+                    # Pattern para permalink
+                    permalink_match = re.search(r'permalink/(\d+)', href)
+                    if permalink_match:
+                        return f"permalink_{permalink_match.group(1)}"
+                        
+        except Exception:
+            pass
+        
+        # Estratégia 2: Usar data attributes do Facebook
+        try:
+            # Buscar por data-ft ou data-testid
+            data_attrs = ['data-ft', 'data-testid', 'data-ad-preview']
+            
+            for attr in data_attrs:
+                elem = post_element.locator(f'[{attr}]').first()
+                if await elem.count() > 0:
+                    attr_value = await elem.get_attribute(attr)
+                    if attr_value and len(attr_value) > 5:
+                        # Usar hash do atributo como ID
+                        import hashlib
+                        attr_hash = hashlib.md5(attr_value.encode()).hexdigest()[:12]
+                        return f"attr_{attr_hash}"
+                        
+        except Exception:
+            pass
+        
+        # Estratégia 3: Gerar ID baseado em conteúdo
+        try:
+            # Extrair texto único do post
+            text_content = await post_element.text_content() or ""
+            
+            # Pegar primeiras palavras significativas
+            words = []
+            for word in text_content.split():
+                if len(word) > 3 and word.isalpha():
+                    words.append(word.lower())
+                if len(words) >= 3:
+                    break
+            
+            if words:
+                content_signature = "_".join(words)
+                import hashlib
+                content_hash = hashlib.md5(content_signature.encode()).hexdigest()[:12]
+                return f"content_{content_hash}"
+                
+        except Exception:
+            pass
+        
+        # Fallback: usar timestamp + posição
+        try:
+            bbox = await post_element.bounding_box()
+            position = f"{int(bbox['x'])}_{int(bbox['y'])}" if bbox else "0_0"
+            
+            from datetime import datetime
+            timestamp = int(datetime.now().timestamp())
+            return f"fallback_{timestamp}_{position}"
+            
+        except Exception:
+            pass
+        
+        # Último recurso
+        from datetime import datetime
+        return f"unknown_{int(datetime.now().timestamp())}"
+        
+    except Exception as e:
+        bot_logger.debug(f"Erro ao extrair ID do post: {e}")
+        from datetime import datetime
+        return f"error_{int(datetime.now().timestamp())}"
 
 
 async def find_next_unprocessed_post(page: Page, processed_keys: set) -> Optional[Locator]:

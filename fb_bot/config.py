@@ -8,7 +8,7 @@ class BotConfig:
     """Configuração do bot com validação."""
     
     def __init__(self):
-        self.n8n_webhook_url: str = ""
+        self.n8n_webhook_url: str = "http://localhost:5678/webhook/process-post"
         self.facebook_group_url: str = ""
         self.keywords: List[str] = []
         self.loop_interval_seconds: int = 60

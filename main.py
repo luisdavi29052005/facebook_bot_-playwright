@@ -8,7 +8,7 @@ from logger import setup_logging, bot_logger
 from state_manager import StateManager
 from fb_bot.config import config
 from fb_bot.login import fb_login
-from fb_bot.monitor import navigate_to_group, find_next_valid_post, extract_post_id, extract_post_details, find_next_unprocessed_post, infer_post_key
+from fb_bot.monitor import navigate_to_group, find_next_valid_post, extract_post_details, find_next_unprocessed_post, infer_post_key, extract_post_id
 from fb_bot.commenter import open_comment_box, send_comment
 from fb_bot.n8n_client import ask_n8n, healthcheck_n8n
 from fb_bot.circuit_breaker import facebook_circuit_breaker, retry_with_backoff, RetryConfig
@@ -26,7 +26,7 @@ class PostProcessor:
 
     async def process_post(self, post_element, page) -> bool:
         """Processa um único post com circuit breaker protection."""
-        
+
         async def _process_post_core():
             # Check stop event
             if stop_event.is_set():
@@ -43,34 +43,34 @@ class PostProcessor:
                 bot_logger.debug(f"Post {post_id} já processado")
                 return False
 
-            # Extrair detalhes com retry
+            # Extrair detalhes via n8n (screenshot → análise → reply)
             details = await self._extract_with_retry(post_element)
             if not details:
                 self.state.add(post_id)
                 return False
 
-            # Validar conteúdo
-            if not self._is_valid_post(details):
+            # Validar se n8n processou corretamente
+            author = details.get('author', '').strip()
+            text = details.get('text', '').strip()
+            reply = details.get('reply', '').strip()
+
+            if not author or not text or not reply:
+                bot_logger.warning(f"Dados incompletos do n8n - autor:{bool(author)}, texto:{bool(text)}, reply:{bool(reply)}")
                 self.state.add(post_id)
                 return False
 
-            # Verificar palavras-chave
-            if not self._matches_keywords(details.get('text', '')):
+            # Verificar palavras-chave no texto extraído
+            if not self._matches_keywords(text):
                 bot_logger.debug("Post filtrado - sem palavras-chave relevantes")
                 self.state.add(post_id)
                 return False
 
             # Lead encontrado!
-            bot_logger.info(f"LEAD ENCONTRADO: {details.get('author', 'N/A')}")
-            bot_logger.info(f"Texto: {details.get('text', '')[:100]}...")
+            bot_logger.info(f"LEAD ENCONTRADO: {author}")
+            bot_logger.info(f"Texto: {text[:100]}...")
+            bot_logger.info(f"Reply: {reply[:50]}...")
 
-            # Enviar para n8n com backoff exponencial
-            reply = await self._get_ai_response_async(details, post_id)
-            if not reply:
-                self.state.add(post_id)
-                return False
-
-            # Comentar com circuit breaker
+            # Comentar com reply do n8n
             success = await facebook_circuit_breaker.call(
                 self._send_comment, post_element, reply
             )
@@ -81,7 +81,7 @@ class PostProcessor:
                 bot_logger.info(f"Comentário enviado! Total de leads: {self.leads_found_session}")
 
             return success
-        
+
         try:
             return await _process_post_core()
         except Exception as e:
@@ -89,21 +89,26 @@ class PostProcessor:
             return False
 
     async def _extract_with_retry(self, post_element, max_retries: int = 2):
-        """Extrai detalhes com retry limitado."""
+        """Extrai detalhes via n8n com retry limitado."""
         for attempt in range(max_retries + 1):
             try:
-                details = await extract_post_details(post_element)
-                if details and (details.get('text') or details.get('image_url') or details.get('has_video')):
+                details = await extract_post_details(post_element, config.n8n_webhook_url)
+                
+                # Verificar se n8n retornou dados completos
+                if (details and 
+                    details.get('author') and 
+                    details.get('text') and 
+                    details.get('reply')):
                     return details
 
                 if attempt < max_retries:
                     bot_logger.debug(f"Tentativa {attempt + 1} falhou, aguardando...")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(3)
 
             except Exception as e:
                 bot_logger.error(f"Erro na extração tentativa {attempt + 1}: {e}")
                 if attempt < max_retries:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(3)
 
         return None
 
@@ -141,36 +146,7 @@ class PostProcessor:
         text_lower = text.lower()
         return any(keyword.lower() in text_lower for keyword in config.keywords)
 
-    async def _get_ai_response_async(self, details: dict, post_id: str) -> Optional[str]:
-        """Obtém resposta da IA com backoff exponencial."""
-        payload = {
-            "prompt": details.get('text', 'Post sem texto - apenas imagem'),
-            "author": details.get('author', 'Autor não identificado'),
-            "image_url": details.get('image_url', ''),
-            "post_id": post_id
-        }
-
-        bot_logger.info("Enviando para IA...")
-
-        # Retry com backoff exponencial
-        max_retries = 3
-        base_delay = 1
-
-        for attempt in range(max_retries):
-            try:
-                reply = await ask_n8n(config.n8n_webhook_url, payload)
-                if reply:
-                    bot_logger.info(f"IA respondeu: {reply[:50]}...")
-                    return reply
-
-            except Exception as e:
-                bot_logger.error(f"Erro na tentativa {attempt + 1}: {e}")
-                if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
-                    await asyncio.sleep(delay)
-
-        bot_logger.error("IA não respondeu após todas as tentativas")
-        return None
+    
 
     async def _send_comment(self, post_element, comment: str) -> bool:
         """Envia comentário no post."""
@@ -193,14 +169,15 @@ async def main_loop():
         bot_logger.error(f"Configuração inválida: {error_msg}")
         return
 
-    # Verificar n8n
-    try:
-        if not await healthcheck_n8n(config.n8n_webhook_url):
-            bot_logger.error("n8n não está acessível")
-            return
-    except Exception as e:
-        bot_logger.error(f"Erro ao verificar n8n: {e}")
-        return
+    # Verificar n8n apenas se configurado
+    if config.n8n_webhook_url:
+        try:
+            if not await healthcheck_n8n(config.n8n_webhook_url):
+                bot_logger.warning("n8n não está acessível - continuando sem processamento via n8n")
+        except Exception as e:
+            bot_logger.warning(f"Erro ao verificar n8n: {e} - continuando sem processamento via n8n")
+    else:
+        bot_logger.warning("n8n não configurado - screenshots não serão processados")
 
     # Inicializar
     state = StateManager()
@@ -272,7 +249,7 @@ async def main_loop():
 
                 bot_logger.info("🔄 Iniciando processamento sequencial com deduplicação...")
 
-                # Loop sequencial: busca → processa → marca → scroll → repete
+                # Loop sequencial: busca → screenshot → n8n processa → comenta → scroll → próximo
                 for post_number in range(config.max_posts_per_cycle):
                     if stop_event.is_set():
                         bot_logger.info("Stop event detectado, parando processamento")
@@ -288,7 +265,7 @@ async def main_loop():
 
                         # Combinar chaves já processadas (estado + sessão atual)
                         all_processed_keys = state._processed_ids.union(seen_this_run)
-                        
+
                         post_element = await find_next_unprocessed_post(page, all_processed_keys)
 
                         if not post_element:
@@ -334,7 +311,7 @@ async def main_loop():
                         if post_key == last_post_key:
                             key_repetition_count += 1
                             bot_logger.warning(f"⚠️ Mesmo post detectado {key_repetition_count} vezes seguidas")
-                            
+
                             if key_repetition_count >= 3:
                                 bot_logger.warning("🚨 Preso no mesmo post - forçando scroll e pulo")
                                 await post_element.evaluate('el => el.setAttribute("data-processed", "true")')
@@ -349,13 +326,14 @@ async def main_loop():
                         bot_logger.success(f"✅ POST #{post_number + 1} ENCONTRADO (novo) - iniciando processamento completo")
 
                         # ═══ ETAPA 3: PROCESSAR POST COMPLETAMENTE ═══
+                        # Processamento sequencial: screenshot → n8n analisa → comentário
                         success = await processor.process_post(post_element, page)
 
                         # ═══ ETAPA 4: MARCAR COMO PROCESSADO ═══
                         # Adicionar às chaves processadas
                         state.add(post_key)
                         seen_this_run.add(post_key)
-                        
+
                         # Marcar no DOM para não reaparecer
                         try:
                             await post_element.evaluate('el => el.setAttribute("data-processed", "true")')
@@ -365,17 +343,18 @@ async def main_loop():
                         if success:
                             leads_found += 1
                             bot_logger.success(f"🎯 LEAD #{leads_found} PROCESSADO COM SUCESSO!")
+                            bot_logger.info("⏸️ Aguardando 15s após comentário antes do próximo post...")
                             await asyncio.sleep(15)  # Pausa pós-comentário
                         else:
-                            bot_logger.debug("⏸️ Post processado sem comentário")
-                            await asyncio.sleep(5)
+                            bot_logger.debug("⏸️ Post processado sem comentário - avançando...")
+                            await asyncio.sleep(3)
 
-                        # ═══ ETAPA 5: SCROLL PARA PRÓXIMO POST ═══
+                        # ═══ ETAPA 5: SCROLL PARA PRÓXIMO POST (APENAS APÓS PROCESSAMENTO COMPLETO) ═══
                         try:
                             # Scroll para "consumir" o post atual e revelar próximos
-                            bot_logger.debug("📜 Scroll para próximo post...")
-                            await page.mouse.wheel(0, 1000)
-                            await asyncio.sleep(2)
+                            bot_logger.debug("📜 Fazendo scroll para próximo post...")
+                            await page.mouse.wheel(0, 1200)
+                            await asyncio.sleep(3)  # Aguardar novos posts carregarem
                         except Exception as e:
                             bot_logger.debug(f"Erro no scroll pós-processamento: {e}")
 
@@ -386,8 +365,7 @@ async def main_loop():
                             bot_logger.warning("❌ Página não responde - interrompendo ciclo")
                             break
 
-                        bot_logger.info(f"✅ Post #{post_number + 1} CONCLUÍDO - avançando...")
-                        await asyncio.sleep(2)  # Pausa entre posts
+                        bot_logger.info(f"✅ Post #{post_number + 1} TOTALMENTE CONCLUÍDO - avançando para próximo...")
 
                     except Exception as e:
                         bot_logger.error(f"❌ Erro crítico processando post #{post_number + 1}: {e}")
