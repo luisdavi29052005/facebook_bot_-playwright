@@ -1364,6 +1364,10 @@ async def _extract_images(post: Locator):
         bot_logger.debug(f"Imagens extraídas: {len(unique_images)}")
         return unique_images
 
+    except Exception as e:
+        bot_logger.debug(f"Erro na extração de imagens: {e}")
+        return []
+
 
 async def has_video(post: Locator) -> bool:
     """Verifica se o post contém vídeo."""
@@ -1388,8 +1392,3 @@ async def has_video(post: Locator) -> bool:
         return False
     except Exception:
         return False
-
-
-    except Exception as e:
-        bot_logger.debug(f"Erro na extração de imagens: {e}")
-        return []
