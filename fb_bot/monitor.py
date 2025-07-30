@@ -28,7 +28,7 @@ async def process_post(post: Locator, n8n_webhook_url: str) -> Dict[str, Any]:
     """
     # Tirar screenshot do post inteiro
     screenshot_path = await take_post_screenshot(post)
-    
+
     # Gerar ID único do post
     post_id = await extract_post_id(post)
 
@@ -39,11 +39,11 @@ async def process_post(post: Locator, n8n_webhook_url: str) -> Dict[str, Any]:
     # Processar via n8n (obrigatório agora)
     if n8n_webhook_url and screenshot_path:
         bot_logger.info("🤖 Processando post via n8n com IA...")
-        
+
         from .n8n_client import process_screenshot_with_n8n
-        
+
         n8n_result = await process_screenshot_with_n8n(n8n_webhook_url, screenshot_path, post_id)
-        
+
         if n8n_result:
             author = n8n_result.get('author', '')
             text = n8n_result.get('text', '')
@@ -69,9 +69,86 @@ async def process_post(post: Locator, n8n_webhook_url: str) -> Dict[str, Any]:
         "has_video": False
     }
 
-        # Ocultar comentários via CSS antes do screenshot
+async def take_post_screenshot(post: Locator) -> str:
+    """
+    Tira screenshot do post específico de forma robusta e previsível.
+
+    Estratégia otimizada:
+    1. Encontrar o message anchor estável do Facebook Comet
+    2. Usar o article container completo para screenshot
+    3. Garantir visibilidade completa com scroll_into_view_if_needed
+    4. Usar bounding box para clip preciso
+    5. Aplicar zoom otimizado se necessário
+    6. Ocultar comentários via CSS antes do screenshot
+    """
+    try:
+        # Verificar se página ainda está ativa
+        if post.page.is_closed():
+            bot_logger.error("Página fechada - não é possível tirar screenshot")
+            return ""
+
+        # Aguardar estabilidade do post
+        await wait_post_ready(post)
+
+        page = post.page
+        bot_logger.debug("📸 Iniciando screenshot otimizado do post...")
+
+        # Criar timestamp único
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+        # Criar diretórios se não existirem
+        screenshots_dir = Path("screenshots/posts")
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+        # ESTRATÉGIA: Usar o message anchor estável para encontrar o article container
+        message_anchor = post.locator('div[data-ad-rendering-role="story_message"] div[data-ad-preview="message"]').first()
+
+        screenshot_element = None
+
+        if await message_anchor.count() > 0:
+            bot_logger.debug("📍 Message anchor encontrado - buscando article container...")
+
+            # Subir para o article container usando JavaScript
+            article_handle = await message_anchor.evaluate_handle('el => el.closest("[role=\'article\']")')
+
+            if article_handle:
+                screenshot_element = article_handle.as_element()
+                bot_logger.debug("✅ Article container encontrado via message anchor")
+            else:
+                bot_logger.debug("⚠️ Article container não encontrado - usando fallback")
+
+        # Fallback: usar o próprio post locator
+        if not screenshot_element:
+            screenshot_element = post
+            bot_logger.debug("📸 Usando post locator como fallback")
+
+        # GARANTIR VISIBILIDADE COMPLETA
+        bot_logger.debug("🎯 Garantindo visibilidade completa do elemento...")
+        await screenshot_element.scroll_into_view_if_needed()
+        
+        # Aguardar elemento estar realmente visível
         try:
-            page = post.page
+            await screenshot_element.wait_for(state="visible", timeout=5000)
+            bot_logger.debug("✅ Elemento confirmado como visível")
+        except Exception as e:
+            bot_logger.warning(f"⚠️ Timeout aguardando visibilidade: {e}")
+
+        # Aguardar renderização completa
+        await asyncio.sleep(1)
+
+        # APLICAR ZOOM OTIMIZADO SE NECESSÁRIO
+        try:
+            # Verificar se precisa de zoom (elemento muito pequeno)
+            bbox = await screenshot_element.bounding_box()
+            if bbox and (bbox["width"] < 400 or bbox["height"] < 200):
+                bot_logger.debug("🔍 Aplicando zoom para elemento pequeno...")
+                await page.evaluate("document.body.style.zoom = '1.20'")  # 120%
+                await asyncio.sleep(0.5)  # Aguardar zoom aplicar
+        except Exception as e:
+            bot_logger.debug(f"Erro aplicando zoom: {e}")
+
+        # OCULTAR COMENTÁRIOS VIA CSS ANTES DO SCREENSHOT
+        try:
             await page.add_style_tag(content="""
                 [aria-label*="oment" i], 
                 [data-testid*="UFI2Comment"],
@@ -79,34 +156,80 @@ async def process_post(post: Locator, n8n_webhook_url: str) -> Dict[str, Any]:
                 [aria-label*="Write a comment" i] { 
                     display: none !important; 
                 }
+                
+                /* Garantir que o post seja bem visível */
+                [role="article"] {
+                    background: white !important;
+                    border: 1px solid #e4e6ea !important;
+                    margin-bottom: 16px !important;
+                }
             """)
-            bot_logger.debug("🚫 Comentários ocultados via CSS")
+            bot_logger.debug("🚫 Comentários ocultados e post destacado via CSS")
         except Exception as e:
-            bot_logger.debug(f"Erro ocultando comentários: {e}")
+            bot_logger.debug(f"Erro aplicando estilos: {e}")
 
-        # Tirar screenshot do elemento correto
+        # Aguardar CSS aplicar
+        await asyncio.sleep(0.3)
+
+        # TIRAR SCREENSHOT COM BOUNDING BOX OTIMIZADO
         screenshot_path = screenshots_dir / f"post_{timestamp}.png"
-        await screenshot_element.screenshot(path=str(screenshot_path))
+        
+        try:
+            # Obter bounding box atualizado
+            bbox = await screenshot_element.bounding_box()
+            
+            if bbox:
+                bot_logger.debug(f"📏 Usando bounding box: {bbox['width']}x{bbox['height']} @ ({bbox['x']}, {bbox['y']})")
+                
+                # Screenshot com clip preciso
+                await page.screenshot(
+                    path=str(screenshot_path),
+                    clip={
+                        "x": bbox["x"],
+                        "y": bbox["y"], 
+                        "width": bbox["width"],
+                        "height": bbox["height"]
+                    }
+                )
+            else:
+                bot_logger.warning("⚠️ Bounding box não disponível - usando screenshot do elemento")
+                # Fallback: screenshot do elemento diretamente
+                await screenshot_element.screenshot(path=str(screenshot_path))
+                
+        except Exception as e:
+            bot_logger.warning(f"Erro no screenshot otimizado: {e}")
+            # Fallback final: screenshot simples do elemento
+            try:
+                await screenshot_element.screenshot(path=str(screenshot_path))
+            except Exception as fallback_error:
+                bot_logger.error(f"Erro no fallback do screenshot: {fallback_error}")
+                return ""
 
-        bot_logger.success(f"📸 Screenshot do post salvo: {screenshot_path}")
-        print(f"DEBUG: Screenshot salvo em: {screenshot_path}")  # Debug temporário
+        # RESETAR ZOOM SE FOI APLICADO
+        try:
+            await page.evaluate("document.body.style.zoom = '1.0'")
+        except Exception:
+            pass
+
+        bot_logger.success(f"📸 Screenshot otimizado salvo: {screenshot_path}")
 
         # Retornar caminho do screenshot
         screenshot_result = str(screenshot_path)
 
-        # Também salvar HTML para referência
-        html_dumps_dir = Path("html_dumps/posts")
-        html_dumps_dir.mkdir(parents=True, exist_ok=True)
+        # SALVAR HTML PARA REFERÊNCIA (opcional)
+        try:
+            html_dumps_dir = Path("html_dumps/posts")
+            html_dumps_dir.mkdir(parents=True, exist_ok=True)
 
-        html_path = html_dumps_dir / f"post_{timestamp}.html"
-        inner_html = await screenshot_element.inner_html()
+            html_path = html_dumps_dir / f"post_{timestamp}.html"
+            inner_html = await screenshot_element.inner_html()
 
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(f"""<!DOCTYPE html>
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Post Completo - {timestamp}</title>
+    <title>Post Otimizado - {timestamp}</title>
     <style>
         body {{ font-family: Arial, sans-serif; margin: 20px; background: #f0f2f5; }}
         .post-info {{ background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
@@ -123,10 +246,10 @@ async def process_post(post: Locator, n8n_webhook_url: str) -> Dict[str, Any]:
 </head>
 <body>
     <div class="post-info">
-        <h1>📸 Post Capturado (Sem Comentários)</h1>
+        <h1>📸 Post Capturado (Otimizado)</h1>
         <p class="timestamp"><strong>Data/Hora:</strong> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
         <p><strong>Arquivo:</strong> {screenshot_path.name}</p>
-        <p><strong>Estratégia:</strong> Article container via message anchor</p>
+        <p><strong>Estratégia:</strong> Bounding box com zoom otimizado</p>
     </div>
     <div class="post-content">
 {inner_html}
@@ -134,12 +257,14 @@ async def process_post(post: Locator, n8n_webhook_url: str) -> Dict[str, Any]:
 </body>
 </html>""")
 
-        bot_logger.debug(f"HTML do post salvo: {html_path}")
+            bot_logger.debug(f"HTML do post salvo: {html_path}")
+        except Exception as e:
+            bot_logger.debug(f"Erro salvando HTML: {e}")
 
         return screenshot_result
 
     except Exception as e:
-        bot_logger.warning(f"Erro ao tirar screenshot do post: {e}")
+        bot_logger.warning(f"Erro ao tirar screenshot otimizado do post: {e}")
         return ""
 
 async def debug_dump_article(article: Locator, tag: str):
@@ -778,7 +903,7 @@ async def _has_timestamp_indicator(article) -> bool:
 async def _is_obvious_ui_element(article) -> bool:
     """Verificação rápida de elementos de UI óbvios."""
     try:
-        # Pegar apenas primeiros 200 caracteres para performance
+        # Pegar apenas primeiros 200```text
         text_content = await article.text_content()
         if not text_content:
             return False
@@ -974,7 +1099,136 @@ async def find_next_valid_post(page: Page) -> Locator:
     bot_logger.warning("❌ Nenhum post válido encontrado após busca completa")
     return None
 
+async def ensure_element_visible(page: Page, element: Locator, scroll_behavior: str = "smooth") -> bool:
+    """
+    Garante que o elemento esteja visível na viewport, rolando a página se necessário.
+    Versão otimizada com verificações mais rigorosas.
+    Retorna True se o elemento se tornou visível, False caso contrário.
+    """
+    try:
+        # Verificar se elemento existe primeiro
+        if await element.count() == 0:
+            bot_logger.warning("Elemento não encontrado - não pode garantir visibilidade")
+            return False
 
+        # Aguardar elemento estar anexado ao DOM
+        try:
+            await element.wait_for(state="attached", timeout=3000)
+        except Exception:
+            bot_logger.warning("Elemento não está anexado ao DOM")
+            return False
+
+        # Obter bounding box do elemento
+        box = await element.bounding_box()
+
+        if not box:
+            bot_logger.warning("Elemento sem bounding box - tentando rolar mesmo assim...")
+            # Tentar rolar para o elemento mesmo sem bounding box
+            try:
+                await element.scroll_into_view_if_needed(timeout=8000)
+                await asyncio.sleep(1)
+                box = await element.bounding_box()
+                if not box:
+                    return False
+            except Exception:
+                return False
+
+        # Obter tamanho da viewport
+        viewport_size = page.viewport_size
+        if not viewport_size:
+            bot_logger.warning("Viewport size não definido")
+            return False
+
+        # Verificar se o elemento está completamente dentro da viewport
+        margin = 10  # Margem para garantir que não está nas bordas
+        is_fully_visible = (
+            box["x"] >= margin and
+            box["y"] >= margin and
+            box["x"] + box["width"] <= viewport_size["width"] - margin and
+            box["y"] + box["height"] <= viewport_size["height"] - margin
+        )
+
+        if is_fully_visible:
+            bot_logger.debug("✅ Elemento já está completamente visível na viewport")
+            return True
+
+        # Verificar se está parcialmente visível
+        is_partially_visible = (
+            box["x"] < viewport_size["width"] and
+            box["y"] < viewport_size["height"] and
+            box["x"] + box["width"] > 0 and
+            box["y"] + box["height"] > 0
+        )
+
+        if not is_partially_visible:
+            bot_logger.debug("🎯 Elemento não está na viewport - rolando para encontrá-lo...")
+        else:
+            bot_logger.debug("🎯 Elemento parcialmente visível - rolando para centralizar...")
+
+        # Rolar a página até o elemento
+        await element.scroll_into_view_if_needed(timeout=10000)
+
+        # Aguardar estabilização
+        await asyncio.sleep(1)
+
+        # Verificar se o scroll foi efetivo
+        new_box = await element.bounding_box()
+        if not new_box:
+            bot_logger.warning("⚠️ Elemento perdeu bounding box após scroll")
+            return False
+
+        # Verificar visibilidade final com margem mais generosa
+        final_margin = 5
+        is_now_visible = (
+            new_box["x"] >= -final_margin and
+            new_box["y"] >= -final_margin and
+            new_box["x"] + new_box["width"] <= viewport_size["width"] + final_margin and
+            new_box["y"] + new_box["height"] <= viewport_size["height"] + final_margin
+        )
+
+        if is_now_visible:
+            bot_logger.debug("✅ Elemento visível após rolagem")
+            return True
+        else:
+            # Tentar um scroll adicional mais suave
+            bot_logger.debug("🔄 Tentando ajuste fino na rolagem...")
+            try:
+                # Calcular offset para centralizar melhor
+                center_y = new_box["y"] + new_box["height"] / 2
+                viewport_center = viewport_size["height"] / 2
+                
+                if center_y > viewport_center:
+                    # Elemento está abaixo do centro, rolar para baixo um pouco
+                    await page.mouse.wheel(0, 100)
+                else:
+                    # Elemento está acima do centro, rolar para cima um pouco
+                    await page.mouse.wheel(0, -100)
+                
+                await asyncio.sleep(0.5)
+                
+                # Verificação final
+                final_box = await element.bounding_box()
+                if final_box:
+                    is_final_visible = (
+                        final_box["x"] >= -final_margin and
+                        final_box["y"] >= -final_margin and
+                        final_box["x"] + final_box["width"] <= viewport_size["width"] + final_margin and
+                        final_box["y"] + final_box["height"] <= viewport_size["height"] + final_margin
+                    )
+                    
+                    if is_final_visible:
+                        bot_logger.debug("✅ Elemento visível após ajuste fino")
+                        return True
+                    
+            except Exception as e:
+                bot_logger.debug(f"Erro no ajuste fino: {e}")
+
+            bot_logger.warning("⚠️ Elemento não totalmente visível após todas as tentativas")
+            return False
+
+    except Exception as e:
+        bot_logger.warning(f"Erro ao garantir visibilidade do elemento: {e}")
+        return False
 
 async def extract_post_details(post: Locator, n8n_webhook_url: str = ""):
     """Extrai detalhes do post usando apenas n8n para autor/texto."""
@@ -996,7 +1250,7 @@ async def extract_post_details(post: Locator, n8n_webhook_url: str = ""):
 
     # Tirar screenshot do post inteiro
     screenshot_path = await take_post_screenshot(post)
-    
+
     # Gerar ID único do post
     post_id = await extract_post_id(post)
 
@@ -1007,11 +1261,11 @@ async def extract_post_details(post: Locator, n8n_webhook_url: str = ""):
     # Processar via n8n (obrigatório agora)
     if n8n_webhook_url and screenshot_path:
         bot_logger.info("🤖 Processando post via n8n com IA...")
-        
+
         from .n8n_client import process_screenshot_with_n8n
-        
+
         n8n_result = await process_screenshot_with_n8n(n8n_webhook_url, screenshot_path, post_id)
-        
+
         if n8n_result:
             author = n8n_result.get('author', '')
             text = n8n_result.get('text', '')
@@ -1067,16 +1321,16 @@ async def _extract_author(post: Locator) -> str:
     try:
         # ESTRATÉGIA 1: Usar o anchor message estável do Comet
         # div[data-ad-rendering-role="story_message"] > div[data-ad-preview="message"]
-        
+
         # Primeiro, tentar encontrar o message anchor
         message_anchor = post.locator('div[data-ad-rendering-role="story_message"] div[data-ad-preview="message"]').first()
-        
+
         if await message_anchor.count() > 0:
             bot_logger.debug("📍 Message anchor encontrado - buscando autor no header...")
-            
+
             # Subir para o article container
             article_container = await message_anchor.evaluate_handle('el => el.closest("[role=\'article\']")')
-            
+
             if article_container:
                 # Buscar autor no header do article usando seletores robustos
                 author_strategies = [
@@ -1086,109 +1340,109 @@ async def _extract_author(post: Locator) -> str:
                     'strong a[role="link"][aria-hidden="false"]',
                     'div[role="heading"] a[role="link"][aria-hidden="false"]'
                 ]
-                
+
                 for strategy in author_strategies:
                     try:
                         author_links = article_container.locator(strategy)
                         count = await author_links.count()
-                        
+
                         for i in range(min(count, 3)):  # Verificar primeiros 3 links
                             try:
                                 link = author_links.nth(i)
-                                
+
                                 if not await link.is_visible():
                                     continue
-                                
+
                                 # Verificar se não contém timestamp
                                 has_time = await link.locator('time').count() > 0
                                 if has_time:
                                     continue
-                                
+
                                 # Extrair nome
                                 name = (await link.inner_text() or "").strip()
                                 href = await link.get_attribute("href") or ""
-                                
+
                                 if name and len(name) >= 3:
                                     # Validar se é um nome válido e href parece de perfil
                                     if await _is_valid_author_name(name, link) and _looks_like_profile_href(href):
                                         bot_logger.success(f"✅ AUTOR ENCONTRADO via message anchor: '{name}'")
                                         return name
-                                        
+
                             except Exception as e:
                                 bot_logger.debug(f"Erro verificando link {i}: {e}")
                                 continue
-                                
+
                     except Exception as e:
                         bot_logger.debug(f"Erro na estratégia '{strategy}': {e}")
                         continue
-                        
+
         # ESTRATÉGIA 2: Heurística JavaScript para filtrar autor mais robusto
         try:
             bot_logger.debug("🔍 Usando heurística JavaScript para encontrar autor...")
-            
+
             author_data = await post.evaluate("""
                 (root) => {
                     const anchors = Array.from(root.querySelectorAll('a[role="link"]'));
                     const getText = el => (el.innerText || el.textContent || '').trim();
-                    
+
                     // Regex para reconhecer href de perfil
                     const isProfileHref = href => /(?:\\/groups\\/\\d+\\/user\\/\\d+\\/|\\/people\\/[^/]+\\/\\d+\\/|profile\\.php\\?id=\\d+|\\/[A-Za-z0-9._-]{3,}\\/?$)/.test(href || '');
-                    
+
                     // Primeira tentativa: links com href de perfil, sem timestamp, não-avatar
                     for (const a of anchors) {
                         const href = a.getAttribute('href') || '';
                         const text = getText(a);
                         const hasTime = !!a.querySelector('time');
                         const ariaHidden = a.getAttribute('aria-hidden') === 'true';
-                        
+
                         if (text && !hasTime && !ariaHidden && isProfileHref(href)) {
                             return { text, href, strategy: 'profile_href' };
                         }
                     }
-                    
+
                     // Segunda tentativa: qualquer link com texto, sem timestamp, não-avatar
                     for (const a of anchors) {
                         const text = getText(a);
                         const hasTime = !!a.querySelector('time');
                         const ariaHidden = a.getAttribute('aria-hidden') === 'true';
-                        
+
                         if (text && !hasTime && !ariaHidden && text.length >= 3) {
                             return { text, href: a.getAttribute('href') || '', strategy: 'fallback' };
                         }
                     }
-                    
+
                     return null;
                 }
             """)
-            
+
             if author_data and author_data.get("text"):
                 name = author_data["text"].strip()
                 strategy = author_data.get("strategy", "unknown")
-                
+
                 if await _is_valid_author_name_text(name):
                     bot_logger.success(f"✅ AUTOR ENCONTRADO via heurística ({strategy}): '{name}'")
                     return name
-                    
+
         except Exception as e:
             bot_logger.debug(f"Erro na heurística JavaScript: {e}")
 
         # ESTRATÉGIA 3: Fallback com primeiro h3 válido
         try:
             bot_logger.debug("🔍 Fallback: buscando primeiro h3 do post...")
-            
+
             h3_elements = post.locator('h3 a[role="link"]').first()
             if await h3_elements.count() > 0:
                 name = (await h3_elements.inner_text() or "").strip()
-                
+
                 # Limpar nome de separadores
                 clean_name = name.split('·')[0].split('•')[0].split('\n')[0].strip()
-                
+
                 if await _is_valid_author_name_text(clean_name):
                     # Verificar se não está em seção de comentários
                     if not await _is_inside_comment_section(h3_elements):
                         bot_logger.debug(f"✅ Autor encontrado no fallback h3: '{clean_name}'")
                         return clean_name
-                        
+
         except Exception as e:
             bot_logger.debug(f"Erro no fallback h3: {e}")
 
@@ -1202,7 +1456,7 @@ def _looks_like_profile_href(href: str) -> bool:
     """Verifica se o href parece ser de um perfil de usuário."""
     if not href:
         return False
-        
+
     import re
     profile_patterns = [
         r'/groups/\d+/user/\d+/',
@@ -1210,20 +1464,20 @@ def _looks_like_profile_href(href: str) -> bool:
         r'profile\.php\?id=\d+',
         r'/[A-Za-z0-9._-]{3,}/?$'
     ]
-    
+
     return any(re.search(pattern, href) for pattern in profile_patterns)
 
 async def _is_valid_author_name_text(name: str) -> bool:
     """Valida se o texto extraído é um nome de autor válido."""
     import re
-    
+
     if not name or len(name) < 2:
         return False
-    
+
     # Muito longo para ser nome
     if len(name) > 100:
         return False
-    
+
     # Filtrar skeleton indicators
     skeleton_patterns = [
         r'^[\-\•\·\s]+$',  # Apenas símbolos de skeleton
@@ -1233,16 +1487,16 @@ async def _is_valid_author_name_text(name: str) -> bool:
         r'^\s*carregando\s*$', # Texto "carregando"
         r'^placeholder',    # Começando com "placeholder"
     ]
-    
+
     name_lower = name.lower().strip()
     for pattern in skeleton_patterns:
         if re.match(pattern, name_lower):
             return False
-    
+
     # Contém apenas letras, espaços, hífens e acentos
     if not re.match(r'^[A-Za-zÀ-ÿ\s\-\.\']+$', name):
         return False
-    
+
     # Filtrar termos de UI
     ui_terms = [
         'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar',
@@ -1250,23 +1504,23 @@ async def _is_valid_author_name_text(name: str) -> bool:
         'há', 'ago', 'min', 'hora', 'day', 'yesterday', 'ontem', 'h', 'd',
         'curtida', 'curtidas', 'reagir', 'react', 'reaction', 'reação'
     ]
-    
+
     if any(term in name_lower for term in ui_terms):
         return False
-    
+
     # Não pode ser timestamp
     if re.match(r'^\d+\s*(min|h|d|hora|horas|dia|dias)', name_lower):
         return False
-    
+
     # Deve ter pelo menos uma letra
     if not re.search(r'[A-Za-zÀ-ÿ]', name):
         return False
-    
+
     # Deve ter pelo menos 3 caracteres alfabéticos
     alpha_count = sum(1 for c in name if c.isalpha())
     if alpha_count < 3:
         return False
-    
+
     return True
 
 def _is_valid_timestamp(text: str) -> bool:
@@ -1462,10 +1716,10 @@ async def _extract_text(post: Locator) -> str:
         # ESTRATÉGIA 1: Usar o seletor estável do Comet
         # div[data-ad-rendering-role="story_message"] > div[data-ad-preview="message"]
         message_container = post.locator('div[data-ad-rendering-role="story_message"] div[data-ad-preview="message"]').first()
-        
+
         if await message_container.count() > 0:
             bot_logger.debug("📍 Message container encontrado - extraindo texto...")
-            
+
             # Primeiro, tentar expandir "Ver mais" se houver
             try:
                 see_more_selectors = [
@@ -1491,7 +1745,7 @@ async def _extract_text(post: Locator) -> str:
             # Extrair texto do message container
             try:
                 message_text = (await message_container.inner_text() or "").strip()
-                
+
                 if message_text:
                     # Filtrar e limpar texto
                     lines = message_text.split('\n')
@@ -1516,13 +1770,13 @@ async def _extract_text(post: Locator) -> str:
                         if len(combined_text) >= 8:
                             bot_logger.success(f"✅ Texto extraído via message container: {len(combined_text)} chars")
                             return combined_text
-                            
+
             except Exception as e:
                 bot_logger.debug(f"Erro extraindo texto do message container: {e}")
 
         # ESTRATÉGIA 2: Fallback com div[dir="auto"] visíveis
         bot_logger.debug("🔍 Fallback: buscando em div[dir='auto']...")
-        
+
         text_elements = post.locator('div[dir="auto"]:visible')
         all_texts = []
 
@@ -1530,13 +1784,13 @@ async def _extract_text(post: Locator) -> str:
         for i in range(min(count, 10)):  # Limitar para performance
             try:
                 elem = text_elements.nth(i)
-                
+
                 if not await elem.is_visible():
                     continue
-                
+
                 # Usar inner_text para melhor extração
                 text = (await elem.inner_text() or "").strip()
-                
+
                 if text and len(text) > 10:  # Linhas com mais de 10 caracteres
                     # Filtrar linhas de UI
                     lines = text.split('\n')
@@ -1563,7 +1817,7 @@ async def _extract_text(post: Locator) -> str:
             # Juntar textos válidos e remover duplicatas
             seen_lines = set()
             unique_lines = []
-            
+
             for line in all_texts:
                 line_lower = line.lower()
                 if line_lower not in seen_lines and len(line) > 5:
@@ -1680,10 +1934,10 @@ async def post_has_video(post: Locator) -> bool:
 async def extract_post_id(post_element: Locator) -> str:
     """
     Extrai ID único do post baseado em múltiplos indicadores.
-    
+
     Args:
         post_element: Elemento do post
-        
+
     Returns:
         ID único do post ou "unknown" se não conseguir extrair
     """
@@ -1692,37 +1946,37 @@ async def extract_post_id(post_element: Locator) -> str:
         try:
             permalink_links = post_element.locator('a[href*="story_fbid"], a[href*="posts/"], a[href*="permalink/"]')
             count = await permalink_links.count()
-            
+
             for i in range(min(count, 3)):
                 link = permalink_links.nth(i)
                 href = await link.get_attribute("href")
                 if href:
                     # Extrair ID da URL
                     import re
-                    
+
                     # Pattern para story_fbid
                     story_match = re.search(r'story_fbid=(\d+)', href)
                     if story_match:
                         return f"story_{story_match.group(1)}"
-                    
+
                     # Pattern para posts/
                     posts_match = re.search(r'/posts/(\d+)', href)
                     if posts_match:
                         return f"post_{posts_match.group(1)}"
-                    
+
                     # Pattern para permalink
                     permalink_match = re.search(r'permalink/(\d+)', href)
                     if permalink_match:
                         return f"permalink_{permalink_match.group(1)}"
-                        
+
         except Exception:
             pass
-        
+
         # Estratégia 2: Usar data attributes do Facebook
         try:
             # Buscar por data-ft ou data-testid
             data_attrs = ['data-ft', 'data-testid', 'data-ad-preview']
-            
+
             for attr in data_attrs:
                 elem = post_element.locator(f'[{attr}]').first()
                 if await elem.count() > 0:
@@ -1732,15 +1986,15 @@ async def extract_post_id(post_element: Locator) -> str:
                         import hashlib
                         attr_hash = hashlib.md5(attr_value.encode()).hexdigest()[:12]
                         return f"attr_{attr_hash}"
-                        
+
         except Exception:
             pass
-        
+
         # Estratégia 3: Gerar ID baseado em conteúdo
         try:
             # Extrair texto único do post
             text_content = await post_element.text_content() or ""
-            
+
             # Pegar primeiras palavras significativas
             words = []
             for word in text_content.split():
@@ -1748,32 +2002,32 @@ async def extract_post_id(post_element: Locator) -> str:
                     words.append(word.lower())
                 if len(words) >= 3:
                     break
-            
+
             if words:
                 content_signature = "_".join(words)
                 import hashlib
                 content_hash = hashlib.md5(content_signature.encode()).hexdigest()[:12]
                 return f"content_{content_hash}"
-                
+
         except Exception:
             pass
-        
+
         # Fallback: usar timestamp + posição
         try:
             bbox = await post_element.bounding_box()
             position = f"{int(bbox['x'])}_{int(bbox['y'])}" if bbox else "0_0"
-            
+
             from datetime import datetime
             timestamp = int(datetime.now().timestamp())
             return f"fallback_{timestamp}_{position}"
-            
+
         except Exception:
             pass
-        
+
         # Último recurso
         from datetime import datetime
         return f"unknown_{int(datetime.now().timestamp())}"
-        
+
     except Exception as e:
         bot_logger.debug(f"Erro ao extrair ID do post: {e}")
         from datetime import datetime
@@ -1783,34 +2037,34 @@ async def extract_post_id(post_element: Locator) -> str:
 async def find_next_unprocessed_post(page: Page, processed_keys: set) -> Optional[Locator]:
     """
     Encontra o próximo post não processado na página.
-    
+
     Args:
         page: Página do Playwright
         processed_keys: Conjunto de chaves de posts já processados
-        
+
     Returns:
         Locator do próximo post não processado ou None se não encontrou
     """
     bot_logger.debug(f"🔍 Buscando post não processado... ({len(processed_keys)} já processados)")
-    
+
     try:
         # Buscar posts válidos na página
         post_element = await find_next_valid_post(page)
-        
+
         if not post_element:
             return None
-            
+
         # Gerar chave única do post
         post_key = await infer_post_key(post_element)
-        
+
         # Verificar se já foi processado
         if post_key in processed_keys:
             bot_logger.debug(f"Post já processado: {post_key[:30]}...")
             return None
-            
+
         bot_logger.debug(f"✅ Post não processado encontrado: {post_key[:30]}...")
         return post_element
-        
+
     except Exception as e:
         bot_logger.error(f"Erro ao buscar post não processado: {e}")
         return None
@@ -1819,10 +2073,10 @@ async def find_next_unprocessed_post(page: Page, processed_keys: set) -> Optiona
 async def infer_post_key(post_element: Locator) -> str:
     """
     Gera uma chave única para o post baseada em múltiplos fatores.
-    
+
     Args:
         post_element: Elemento do post
-        
+
     Returns:
         Chave única do post
     """
@@ -1831,10 +2085,10 @@ async def infer_post_key(post_element: Locator) -> str:
         post_id = await extract_post_id(post_element)
         if post_id and post_id != "unknown":
             return post_id
-            
+
         # Estratégia 2: Criar chave baseada em conteúdo
         text_content = await post_element.text_content() or ""
-        
+
         # Pegar primeiras palavras significativas
         words = []
         for word in text_content.split():
@@ -1842,24 +2096,24 @@ async def infer_post_key(post_element: Locator) -> str:
                 words.append(word.lower())
             if len(words) >= 5:
                 break
-                
+
         # Obter posição do elemento
         try:
             bbox = await post_element.bounding_box()
             position = f"{int(bbox['x'])}_{int(bbox['y'])}" if bbox else "0_0"
         except Exception:
             position = "0_0"
-            
+
         # Criar chave única
         content_key = "_".join(words) if words else "no_text"
         unique_string = f"{content_key}_{position}_{len(text_content)}"
-        
+
         # Hash para garantir tamanho consistente
         import hashlib
         post_hash = hashlib.md5(unique_string.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        
+
         return f"inferred:{post_hash}"
-        
+
     except Exception as e:
         bot_logger.debug(f"Erro ao inferir chave do post: {e}")
         # Fallback: timestamp atual

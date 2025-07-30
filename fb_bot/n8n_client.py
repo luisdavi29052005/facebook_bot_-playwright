@@ -44,9 +44,14 @@ async def healthcheck_n8n(webhook_url: str, timeout: int = 10) -> bool:
             headers={'User-Agent': 'FacebookBot/1.0'}
         ) as session:
 
-            async with session.post(webhook_url, json=test_payload) as response:
+            # Healthcheck simples com dados mínimos
+            form_data = aiohttp.FormData()
+            form_data.add_field('test', 'healthcheck')
+            
+            async with session.post(webhook_url, data=form_data) as response:
                 # Aceitar qualquer resposta HTTP como "saudável"
                 if response.status < 600:
+                    logger.debug(f"Healthcheck n8n OK: status {response.status}")
                     return True
                 else:
                     raise Exception(f"HTTP {response.status}")
@@ -77,25 +82,15 @@ async def process_screenshot_with_n8n(webhook_url: str, screenshot_path: str, po
     """
 
     async def _make_screenshot_request():
-        # Converter screenshot para base64
+        # Verificar se arquivo existe
         try:
             screenshot_file = Path(screenshot_path)
             if not screenshot_file.exists():
                 raise Exception(f"Screenshot não encontrado: {screenshot_path}")
 
-            with open(screenshot_file, 'rb') as f:
-                image_data = f.read()
-                image_base64 = base64.b64encode(image_data).decode('utf-8')
-
         except Exception as e:
-            logger.error(f"Erro ao ler screenshot: {e}")
+            logger.error(f"Erro ao verificar screenshot: {e}")
             raise
-
-        payload = {
-            "image_base64": image_base64,
-            "post_id": post_id,
-            "filename": screenshot_file.name
-        }
 
         connector = aiohttp.TCPConnector(
             limit=5,
@@ -114,31 +109,61 @@ async def process_screenshot_with_n8n(webhook_url: str, screenshot_path: str, po
 
             logger.info(f"Enviando screenshot para n8n: {screenshot_file.name}")
 
-            async with session.post(webhook_url, json=payload) as response:
-                if response.status == 200:
-                    response_data = await response.json()
+            # Enviar imagem como multipart/form-data (formato esperado pelo n8n)
+            form_data = aiohttp.FormData()
+            
+            with open(screenshot_file, 'rb') as f:
+                # Ler os dados da imagem
+                image_data = f.read()
+                
+                # Adicionar imagem com headers corretos
+                form_data.add_field(
+                    'image', 
+                    image_data,
+                    filename=screenshot_file.name,
+                    content_type='image/png'
+                )
+                form_data.add_field('post_id', post_id)
+                form_data.add_field('timestamp', str(int(asyncio.get_event_loop().time())))
 
-                    # Extrair dados processados pela IA (conforme fluxo n8n)
-                    author = response_data.get('author', '').strip()
-                    text = response_data.get('text', '').strip()
-                    reply = response_data.get('reply', '').strip()
-                    
-                    if author and text and reply:
-                        logger.info(f"✅ Screenshot processado - Autor: '{author}', Texto: {len(text)} chars, Reply: {len(reply)} chars")
-                        return {
-                            'author': author,
-                            'text': text,
-                            'reply': reply,
-                            'processed_by': 'n8n_ai'
-                        }
+            async with session.post(webhook_url, data=form_data) as response:
+                    if response.status == 200:
+                        try:
+                            response_data = await response.json()
+                            logger.debug(f"Resposta do n8n: {response_data}")
+                            
+                            if response_data is None:
+                                logger.warning("n8n retornou resposta nula")
+                                return None
+
+                            # Extrair dados processados pela IA (conforme fluxo n8n)
+                            author = response_data.get('author', '').strip() if response_data else ''
+                            text = response_data.get('text', '').strip() if response_data else ''
+                            reply = response_data.get('reply', '').strip() if response_data else ''
+                            
+                            if author and text and reply:
+                                logger.info(f"✅ Screenshot processado - Autor: '{author}', Texto: {len(text)} chars, Reply: {len(reply)} chars")
+                                return {
+                                    'author': author,
+                                    'text': text,
+                                    'reply': reply,
+                                    'processed_by': 'n8n_ai'
+                                }
+                            else:
+                                logger.warning(f"n8n processou mas dados incompletos - autor:{bool(author)}, texto:{bool(text)}, reply:{bool(reply)}")
+                                return None
+
+                        except Exception as json_error:
+                            logger.error(f"Erro ao processar JSON do n8n: {json_error}")
+                            # Tentar ler como texto
+                            response_text = await response.text()
+                            logger.debug(f"Resposta como texto: {response_text[:200]}...")
+                            return None
+
                     else:
-                        logger.warning(f"n8n processou mas dados incompletos - autor:{bool(author)}, texto:{bool(text)}, reply:{bool(reply)}")
-                        return None
-
-                else:
-                    error_text = await response.text()
-                    logger.error(f"n8n retornou status {response.status}: {error_text}")
-                    raise Exception(f"n8n HTTP {response.status}")
+                        error_text = await response.text()
+                        logger.error(f"n8n retornou status {response.status}: {error_text}")
+                        raise Exception(f"n8n HTTP {response.status}: {error_text}")
 
     try:
         # Use circuit breaker with retry (menos tentativas para screenshots grandes)
@@ -184,21 +209,41 @@ async def ask_n8n(webhook_url: str, payload: Dict[str, Any], timeout: int = 30) 
 
             async with session.post(webhook_url, json=payload) as response:
                 if response.status == 200:
-                    response_data = await response.json()
+                    try:
+                        response_data = await response.json()
+                        
+                        if response_data is None:
+                            logger.warning("n8n retornou resposta nula")
+                            return None
 
-                    # Extrair resposta da IA do response
-                    ai_response = response_data.get('response', '').strip()
+                        # Extrair resposta da IA do response (múltiplos campos possíveis)
+                        ai_response = (
+                            response_data.get('response', '') or 
+                            response_data.get('reply', '') or 
+                            response_data.get('text', '') or
+                            str(response_data) if isinstance(response_data, str) else ''
+                        ).strip()
 
-                    if ai_response:
-                        logger.info("Resposta recebida da IA via n8n")
-                        return ai_response
-                    else:
-                        logger.warning("n8n retornou resposta vazia")
+                        if ai_response:
+                            logger.info("Resposta recebida da IA via n8n")
+                            return ai_response
+                        else:
+                            logger.warning(f"n8n retornou resposta vazia: {response_data}")
+                            return None
+
+                    except Exception as json_error:
+                        logger.error(f"Erro ao processar JSON do n8n: {json_error}")
+                        # Tentar ler como texto
+                        response_text = await response.text()
+                        if response_text.strip():
+                            logger.info("Resposta recebida como texto da IA via n8n")
+                            return response_text.strip()
                         return None
 
                 else:
-                    logger.error(f"n8n retornou status {response.status}: {await response.text()}")
-                    raise Exception(f"n8n HTTP {response.status}")
+                    error_text = await response.text()
+                    logger.error(f"n8n retornou status {response.status}: {error_text}")
+                    raise Exception(f"n8n HTTP {response.status}: {error_text}")
 
     try:
         # Use circuit breaker with retry
