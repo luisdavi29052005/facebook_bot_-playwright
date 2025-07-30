@@ -15,6 +15,68 @@ from .selectors import FacebookSelectors
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+async def take_post_screenshot(post: Locator):
+    """
+    Tira screenshot do post inteiro para documentação.
+
+    Args:
+        post: Elemento do post
+    """
+    try:
+        # Criar timestamp único
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+        # Criar diretório de screenshots se não existir
+        screenshots_dir = Path("screenshots/posts")
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Rolar até o post para garantir que está visível
+        await post.scroll_into_view_if_needed()
+        await asyncio.sleep(1)
+
+        # Tirar screenshot do post inteiro
+        screenshot_path = screenshots_dir / f"post_{timestamp}.png"
+        await post.screenshot(path=str(screenshot_path))
+        
+        bot_logger.info(f"📸 Screenshot do post salvo: {screenshot_path}")
+
+        # Também salvar HTML para referência
+        html_dumps_dir = Path("html_dumps/posts")
+        html_dumps_dir.mkdir(parents=True, exist_ok=True)
+        
+        html_path = html_dumps_dir / f"post_{timestamp}.html"
+        inner_html = await post.inner_html()
+
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Post Completo - {timestamp}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background: #f0f2f5; }}
+        .post-info {{ background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .post-content {{ background: #fff; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .timestamp {{ color: #65676b; font-size: 14px; }}
+    </style>
+</head>
+<body>
+    <div class="post-info">
+        <h1>📸 Post Capturado</h1>
+        <p class="timestamp"><strong>Data/Hora:</strong> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
+        <p><strong>Arquivo:</strong> {screenshot_path.name}</p>
+    </div>
+    <div class="post-content">
+{inner_html}
+    </div>
+</body>
+</html>""")
+
+        bot_logger.debug(f"HTML do post salvo: {html_path}")
+
+    except Exception as e:
+        bot_logger.warning(f"Erro ao tirar screenshot do post: {e}")
+
 async def debug_dump_article(article: Locator, tag: str):
     """
     Salva screenshot e HTML do artigo para debug.
@@ -80,6 +142,9 @@ async def navigate_to_group(page: Page, group_url: str):
         try:
             bot_logger.info(f"Tentativa {attempt + 1}/3 de navegação")
 
+            # Delay humano antes de navegar
+            await asyncio.sleep(2 + attempt)
+
             # Navegar com wait_until domcontentloaded
             response = await page.goto(group_url, wait_until='domcontentloaded', timeout=45000)
 
@@ -116,6 +181,28 @@ async def navigate_to_group(page: Page, group_url: str):
 
             if not feed_found:
                 bot_logger.warning(f"Nenhum indicador de feed encontrado na tentativa {attempt + 1}")
+
+                # Verificar se CSS carregou (Facebook sem CSS aparece como HTML puro)
+                has_styles = await page.evaluate("""
+                    () => {
+                        const body = document.body;
+                        if (!body) return false;
+
+                        const computedStyle = window.getComputedStyle(body);
+                        const bgColor = computedStyle.backgroundColor;
+
+                        // Facebook tem background específico, não deve ser transparent/branco puro
+                        return bgColor !== 'rgba(0, 0, 0, 0)' && 
+                               bgColor !== 'transparent' && 
+                               bgColor !== 'rgb(255, 255, 255)';
+                    }
+                """)
+
+                if not has_styles:
+                    bot_logger.warning("❌ Facebook carregou sem CSS - recarregando página...")
+                    await page.reload(wait_until='networkidle', timeout=30000)
+                    await asyncio.sleep(5)
+
                 # Ainda assim, tentar rolar para ativar carregamento
                 await page.mouse.wheel(0, 800)
                 await asyncio.sleep(3)
@@ -157,7 +244,7 @@ async def navigate_to_group(page: Page, group_url: str):
 async def wait_post_ready(post: Locator):
     """
     Aguarda o post sair do estado de loading/skeleton antes de extrair dados.
-    Anti-skeleton robusto para evitar extração prematura.
+    Anti-skeleton robusto específico para Facebook - aguarda hidratação completa.
 
     Args:
         post: Elemento do post
@@ -167,98 +254,203 @@ async def wait_post_ready(post: Locator):
         if post.page.is_closed():
             return
 
-        # Rolar até o post para garantir visibilidade
+        # Rolar até o post para garantir visibilidade e ativar carregamento
         await post.scroll_into_view_if_needed()
+        await asyncio.sleep(1)
 
-        # Aguardar múltiplos tipos de skeleton/loading
+        bot_logger.debug("🔄 Aguardando hidratação completa do post...")
+
+        # ETAPA 1: Aguardar skeletons de carregamento sumirem
         skeleton_selectors = [
             '[role="status"][data-visualcompletion="loading-state"]',
             '[data-visualcompletion="loading-state"]',
+            '[aria-label="Carregando..." i]',
             '.shimmer',
-            '[aria-busy="true"]',
-            '.placeholder',
-            '[data-placeholder="1"]'
+            '[aria-busy="true"]'
         ]
 
-        for selector in skeleton_selectors:
+        max_skeleton_wait = 15  # 15 segundos máximo para skeleton sumir
+        skeleton_gone = False
+        
+        for attempt in range(max_skeleton_wait):
+            skeleton_found = False
+            
+            for selector in skeleton_selectors:
+                try:
+                    skeleton_elements = post.locator(selector)
+                    count = await skeleton_elements.count()
+                    
+                    if count > 0:
+                        # Verificar se algum skeleton ainda está visível
+                        for i in range(count):
+                            elem = skeleton_elements.nth(i)
+                            if await elem.is_visible():
+                                skeleton_found = True
+                                bot_logger.debug(f"⏳ Skeleton ativo encontrado: {selector} (tentativa {attempt + 1})")
+                                break
+                        
+                        if skeleton_found:
+                            break
+                            
+                except Exception:
+                    continue
+            
+            if not skeleton_found:
+                skeleton_gone = True
+                bot_logger.debug("✅ Skeletons removidos - post hidratando...")
+                break
+                
+            await asyncio.sleep(1)
+
+        # ETAPA 2: Aguardar autor aparecer (indicador chave)
+        author_ready = False
+        max_author_wait = 10
+        
+        for attempt in range(max_author_wait):
             try:
-                skeleton = post.locator(selector).first()
-                if await skeleton.count() > 0:
-                    bot_logger.debug(f"Aguardando skeleton sumir: {selector}")
-                    await skeleton.wait_for(state='detached', timeout=8000)
-            except Exception:
-                continue
-
-        # Aguardar imagens reais carregarem
-        try:
-            # Verificar placeholders de imagem
-            placeholder_selectors = [
-                'img[src*="safe_image"]',
-                'img[src*="static"]',
-                'img[src=""]'
-            ]
-
-            for selector in placeholder_selectors:
-                placeholder = post.locator(selector).first()
-                if await placeholder.count() > 0:
-                    bot_logger.debug("Aguardando imagem real carregar...")
-                    # Aguardar imagem com conteúdo real
-                    await post.wait_for_selector('img[src*="scontent"], img[src*="fbcdn"]', timeout=6000)
+                # Verificar se há link de autor com texto válido
+                author_links = post.locator('h3 a[role="link"], h2 a[role="link"]')
+                count = await author_links.count()
+                
+                for i in range(min(count, 3)):  # Verificar primeiros 3 links
+                    try:
+                        link = author_links.nth(i)
+                        if await link.is_visible():
+                            text = await link.text_content()
+                            if text and len(text.strip()) >= 3:  # Nome tem pelo menos 3 caracteres
+                                # Verificar se não é skeleton text (Facebook às vezes coloca texto temporário)
+                                text_clean = text.strip()
+                                if not text_clean.startswith('•') and not text_clean.startswith('-'):
+                                    author_ready = True
+                                    bot_logger.debug(f"✅ Autor carregado: '{text_clean[:20]}...'")
+                                    break
+                    except Exception:
+                        continue
+                
+                if author_ready:
                     break
-        except Exception:
-            pass
+                    
+                bot_logger.debug(f"⏳ Aguardando autor aparecer (tentativa {attempt + 1})")
+                await asyncio.sleep(1)
+                
+            except Exception:
+                await asyncio.sleep(1)
 
-        # Aguardar conteúdo de texto aparecer (não apenas skeleton)
+        # ETAPA 3: Aguardar conteúdo de texto substancial (se houver)
         try:
-            # Verificar se há texto real ou ainda é placeholder
-            text_content = await post.text_content()
-            if not text_content or len(text_content.strip()) < 10:
-                bot_logger.debug("Aguardando conteúdo de texto aparecer...")
-                await asyncio.sleep(1.5)
+            text_elements = post.locator('div[dir="auto"]:visible')
+            text_count = await text_elements.count()
+            
+            if text_count > 0:
+                # Aguardar pelo menos algum texto aparecer
+                for attempt in range(5):
+                    try:
+                        full_text = await post.text_content()
+                        if full_text and len(full_text.strip()) > 50:  # Texto substancial
+                            bot_logger.debug("✅ Conteúdo de texto carregado")
+                            break
+                        await asyncio.sleep(1)
+                    except Exception:
+                        await asyncio.sleep(1)
         except Exception:
             pass
 
-        # Aguardar rede ficar ociosa (timeout baixo)
+        # ETAPA 4: Aguardar imagens reais (se houver)
         try:
-            await post.page.wait_for_load_state("networkidle", timeout=2000)
+            # Verificar se há imagens e se são reais (não placeholders)
+            images = post.locator('img')
+            img_count = await images.count()
+            
+            if img_count > 0:
+                real_images_found = False
+                for attempt in range(5):
+                    try:
+                        for i in range(min(img_count, 3)):
+                            img = images.nth(i)
+                            if await img.is_visible():
+                                src = await img.get_attribute('src')
+                                if src and ('scontent' in src or 'fbcdn' in src):
+                                    real_images_found = True
+                                    break
+                        
+                        if real_images_found:
+                            bot_logger.debug("✅ Imagens reais carregadas")
+                            break
+                            
+                        await asyncio.sleep(1)
+                    except Exception:
+                        await asyncio.sleep(1)
         except Exception:
             pass
 
-        # Delay final para garantir renderização
-        await asyncio.sleep(0.8)
+        # ETAPA 5: Delay final para garantir renderização CSS completa
+        await asyncio.sleep(2)
+        
+        # Verificação final: se ainda há skeleton visível, aguardar mais um pouco
+        try:
+            final_skeleton_check = post.locator('[data-visualcompletion="loading-state"]:visible')
+            if await final_skeleton_check.count() > 0:
+                bot_logger.debug("⚠️ Skeleton ainda presente - aguardando mais 3s...")
+                await asyncio.sleep(3)
+        except Exception:
+            pass
+
+        bot_logger.debug("✅ Post completamente hidratado - pronto para extração")
 
     except Exception as e:
-        bot_logger.debug(f"Erro aguardando post pronto: {e}")
+        bot_logger.debug(f"⚠️ Erro aguardando post pronto: {e}")
+        # Fallback: aguardar pelo menos um tempo mínimo
+        await asyncio.sleep(3)
 
 async def is_valid_post(article) -> bool:
     """
-    Valida se o elemento é um post real - OTIMIZADO para processamento sequencial.
+    Valida se o elemento é um post real e completamente carregado.
 
-    Critérios rápidos para filtrar:
+    Critérios de validação:
     - Deve ter estrutura de post (role=article OU indicadores básicos)
     - Não deve ser elemento de UI/navegação
+    - NÃO deve ter skeletons ativos
     - Deve ter conteúdo mínimo (autor E/OU texto/imagem)
 
     Args:
         article: Elemento do artigo a ser validado
 
     Returns:
-        bool: True se for um post válido
+        bool: True se for um post válido e completamente carregado
     """
     try:
-        # ═══ VALIDAÇÃO RÁPIDA ═══
+        # ═══ VALIDAÇÃO 1: VERIFICAR SKELETONS ATIVOS ═══
+        # Se ainda tem skeleton, não é válido para processamento
+        skeleton_selectors = [
+            '[role="status"][data-visualcompletion="loading-state"]',
+            '[data-visualcompletion="loading-state"]',
+            '[aria-label="Carregando..." i]'
+        ]
+        
+        for selector in skeleton_selectors:
+            try:
+                skeleton_elements = article.locator(selector)
+                count = await skeleton_elements.count()
+                
+                if count > 0:
+                    # Verificar se algum skeleton está visível
+                    for i in range(count):
+                        elem = skeleton_elements.nth(i)
+                        if await elem.is_visible():
+                            bot_logger.debug(f"❌ Post rejeitado: skeleton ativo ({selector})")
+                            return False
+            except Exception:
+                continue
 
-        # 1. Verificar role="article" (indicador mais confiável)
+        # ═══ VALIDAÇÃO 2: ESTRUTURA DE POST ═══
         role = await article.get_attribute("role")
         if role == "article":
             # Verificação adicional: não deve ser elemento de UI óbvio
             if not await _is_obvious_ui_element(article):
-                bot_logger.debug("✅ Post validado: role=article + não é UI")
+                bot_logger.debug("✅ Post validado: role=article + não é UI + sem skeleton")
                 return True
 
-        # 2. Se não tem role="article", fazer verificações mais específicas
-
-        # Verificar se tem indicadores básicos de post
+        # ═══ VALIDAÇÃO 3: INDICADORES BÁSICOS ═══
         has_author_indicator = await _has_author_indicator_fast(article)
         has_content_indicator = await _has_content_indicator_fast(article)
 
@@ -267,22 +459,22 @@ async def is_valid_post(article) -> bool:
             bot_logger.debug("❌ Post rejeitado: sem indicadores básicos")
             return False
 
-        # 3. Filtrar elementos claramente de UI
+        # ═══ VALIDAÇÃO 4: FILTRAR UI ═══
         if await _is_obvious_ui_element(article):
             bot_logger.debug("❌ Post rejeitado: elemento de UI")
             return False
 
-        # 4. Verificar se tem timestamp (posts reais têm timestamp)
+        # ═══ VALIDAÇÃO 5: TIMESTAMP (POSTS REAIS TÊM) ═══
         if await _has_timestamp_indicator(article):
-            bot_logger.debug("✅ Post validado: tem timestamp + indicadores")
+            bot_logger.debug("✅ Post validado: timestamp + indicadores + sem skeleton")
             return True
 
-        # 5. Fallback: se tem conteúdo suficiente, aceitar
+        # ═══ VALIDAÇÃO 6: FALLBACK COM CONTEÚDO SUFICIENTE ═══
         if has_author_indicator and has_content_indicator:
-            bot_logger.debug("✅ Post validado: autor + conteúdo")
+            bot_logger.debug("✅ Post validado: autor + conteúdo + sem skeleton")
             return True
 
-        bot_logger.debug("❌ Post rejeitado: não passou nas validações")
+        bot_logger.debug("❌ Post rejeitado: não passou nas validações completas")
         return False
 
     except Exception as e:
@@ -856,6 +1048,9 @@ async def extract_post_details(post: Locator):
             "has_video": False
         }
 
+    # NOVO: Tirar screenshot do post inteiro
+    await take_post_screenshot(post)
+
     # Text expansion is now handled within _extract_text function
 
     # Extrair autor
@@ -874,16 +1069,16 @@ async def extract_post_details(post: Locator):
     images = await _extract_images(post)
 
     # Verificar se há vídeo no post
-    has_video = await has_video(post)
-    if has_video:
+    contains_video = await post_has_video(post)
+    if contains_video:
         bot_logger.debug("Post contém vídeo; marcando como conteúdo visual")
 
-    if not images and not has_video:
+    if not images and not contains_video:
         bot_logger.warning("Imagens não encontradas - criando debug dump")
         await debug_dump_article(post, "missing_images")
 
     # Manter compatibilidade: primeira imagem como principal
-    image_url = images[0] if images else ("[vídeo]" if has_video else "")
+    image_url = images[0] if images else ("[vídeo]" if contains_video else "")
     images_extra = images[1:] if len(images) > 1 else []
 
     # Log adicional para debug se post parece vazio
@@ -902,14 +1097,14 @@ async def extract_post_details(post: Locator):
         except Exception as e:
             bot_logger.debug(f"Erro ao salvar debug do post vazio: {e}")
 
-    bot_logger.debug(f"Extração: autor='{author}', texto={len(text)} chars, imagens={len(images)}, vídeo={has_video}")
+    bot_logger.debug(f"Extração: autor='{author}', texto={len(text)} chars, imagens={len(images)}, vídeo={contains_video}")
 
     return {
         "author": author.strip() if author else "",
         "text": text.strip() if text else "",
         "image_url": image_url.strip() if image_url else "",
         "images_extra": images_extra,
-        "has_video": has_video
+        "has_video": contains_video
     }
 
 async def _extract_author(post: Locator) -> str:
@@ -1103,7 +1298,7 @@ async def _is_author_near_timestamp(author_elem: Locator, timestamp_elem: Locato
         return True  # Se não conseguir calcular, assumir que está próximo
 
 async def _is_valid_author_name(name: str, elem: Locator) -> bool:
-    """Valida se o nome extraído é realmente um autor válido."""
+    """Valida se o nome extraído é realmente um autor válido e não um skeleton."""
     import re
 
     if not name or len(name) < 2:
@@ -1113,11 +1308,27 @@ async def _is_valid_author_name(name: str, elem: Locator) -> bool:
     if len(name) > 100:
         return False
 
-    # Contém apenas letras, espaços, hífens e acentos
+    # ═══ FILTRAR SKELETON INDICATORS ═══
+    # Facebook às vezes coloca texto temporário durante carregamento
+    skeleton_patterns = [
+        r'^[\-\•\·\s]+$',  # Apenas símbolos de skeleton
+        r'^[•]{2,}$',      # Múltiplos pontos
+        r'^[\-]{2,}$',     # Múltiplos hífens
+        r'^\s*loading\s*$', # Texto "loading"
+        r'^\s*carregando\s*$', # Texto "carregando"
+        r'^placeholder',    # Começando com "placeholder"
+    ]
+    
+    name_lower = name.lower().strip()
+    for pattern in skeleton_patterns:
+        if re.match(pattern, name_lower):
+            return False
+
+    # Contém apenas letras, espaços, hífens e acentos (sem símbolos de skeleton)
     if not re.match(r'^[A-Za-zÀ-ÿ\s\-\.\']+$', name):
         return False
 
-    # Não pode ser termo de UI (mais rigoroso)
+    # ═══ FILTRAR TERMOS DE UI ═══
     ui_terms = [
         'like', 'comment', 'share', 'curtir', 'comentar', 'compartilhar',
         'responder', 'reply', 'ver mais', 'see more', 'seguir', 'follow',
@@ -1125,8 +1336,6 @@ async def _is_valid_author_name(name: str, elem: Locator) -> bool:
         'curtida', 'curtidas', 'reagir', 'react', 'reaction', 'reação',
         'photofix', 'studio'  # Filtrar nomes de empresa/página quando aparecem como comentário
     ]
-
-    name_lower = name.lower()
 
     # Verificar se contém termos de UI
     if any(term in name_lower for term in ui_terms):
@@ -1146,7 +1355,7 @@ async def _is_valid_author_name(name: str, elem: Locator) -> bool:
 
     # Verificar se não é termo isolado suspeito
     words = name_lower.split()
-    suspicious_single_words = ['sure', 'ok', 'yes', 'no', 'sim', 'não']
+    suspicious_single_words = ['sure', 'ok', 'yes', 'no', 'sim', 'não', 'loading', 'carregando']
     if len(words) == 1 and words[0] in suspicious_single_words:
         return False
 
@@ -1154,6 +1363,15 @@ async def _is_valid_author_name(name: str, elem: Locator) -> bool:
     alpha_count = sum(1 for c in name if c.isalpha())
     if alpha_count < 3:
         return False
+
+    # ═══ VERIFICAÇÃO ADICIONAL: ELEMENTO NÃO DEVE TER SKELETON ═══
+    try:
+        # Verificar se o próprio elemento ou seus ancestrais têm indicadores de skeleton
+        skeleton_ancestor = elem.locator('xpath=ancestor-or-self::*[@data-visualcompletion="loading-state"]')
+        if await skeleton_ancestor.count() > 0:
+            return False
+    except Exception:
+        pass
 
     return True
 
@@ -1363,7 +1581,7 @@ async def _extract_images(post: Locator):
         return []
 
 
-async def has_video(post: Locator) -> bool:
+async def post_has_video(post: Locator) -> bool:
     """Verifica se o post contém vídeo."""
     try:
         # Verificar elementos de vídeo
@@ -1374,7 +1592,7 @@ async def has_video(post: Locator) -> bool:
             '[aria-label*="vídeo" i]',
             'div[role="button"][aria-label*="play" i]'
         ]
-        
+
         for selector in video_selectors:
             try:
                 video_elements = post.locator(selector)
@@ -1382,7 +1600,7 @@ async def has_video(post: Locator) -> bool:
                     return True
             except Exception:
                 continue
-        
+
         return False
     except Exception:
         return False

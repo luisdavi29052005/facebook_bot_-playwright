@@ -1,8 +1,10 @@
 import json
 import asyncio
+import random
 from pathlib import Path
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 import logging
+from .stealth_config import USER_AGENTS, VIEWPORTS, HTTP_HEADERS, CHROME_ARGS, STEALTH_SCRIPT, HUMAN_TIMING
 
 # Diretório para sessão persistente
 SESSION_DIR = "./sessions/facebook_profile"
@@ -27,31 +29,23 @@ class PlaywrightFBLogin:
 
         logging.info(f"📁 Usando diretório de sessão persistente: {SESSION_DIR}")
 
-        # Configuração robusta do contexto
+        # Configuração stealth dinâmica para evitar detecção
+        selected_user_agent = random.choice(USER_AGENTS)
+        selected_viewport = random.choice(VIEWPORTS)
+        
         context_options = {
             'user_data_dir': SESSION_DIR,
             'headless': self.headless,
-            'viewport': {'width': 1366, 'height': 768},
+            'viewport': selected_viewport,
             'locale': 'pt-BR',
             'timezone_id': 'America/Sao_Paulo',
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'extra_http_headers': {
-                'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br'
-            },
-            'args': [
-                '--disable-notifications',
-                '--disable-infobars',
-                '--disable-extensions',
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-web-security',
-                '--allow-running-insecure-content',
-                '--disable-features=VizDisplayCompositor'
-            ]
+            'user_agent': selected_user_agent,
+            'extra_http_headers': HTTP_HEADERS,
+            'args': CHROME_ARGS
         }
+        
+        logging.info(f"🎭 Usando User Agent: {selected_user_agent[:50]}...")
+        logging.info(f"📱 Viewport: {selected_viewport}")
 
         # Para launch_persistent_context, o storage_state é carregado automaticamente
         # através do user_data_dir, então não precisamos especificar separadamente
@@ -73,8 +67,13 @@ class PlaywrightFBLogin:
             self.page = await self.context.new_page()
             logging.info("📄 Criando nova página no contexto persistente")
 
-        # Configurar interceptadores de requisição para melhor performance
-        await self.page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", lambda route: route.abort())
+        # Injetar scripts stealth para mascarar automação
+        await self._inject_stealth_scripts()
+
+        # NÃO bloquear CSS - precisamos que carregue
+        # Bloquear apenas recursos desnecessários
+        await self.page.route("**/*.{woff,woff2,ttf,eot}", lambda route: route.abort())
+        await self.page.route("**/favicon.ico", lambda route: route.abort())
 
         # Garantir login válido
         if await self.ensure_logged_in():
@@ -114,7 +113,7 @@ class PlaywrightFBLogin:
                     logging.info("✅ Login confirmado - sem formulário de login")
                     await self._save_storage_state()
                     return True
-            
+
             # Verificar se já está logado via elementos da página
             if await self._check_login_status():
                 logging.info("✅ Já logado via sessão persistente")
@@ -140,25 +139,81 @@ class PlaywrightFBLogin:
             logging.error(f"❌ Erro no processo de login: {e}")
             return False
 
-    async def _navigate_to_facebook(self, retries=3):
-        """Navega para Facebook com retry."""
-        for attempt in range(retries):
+    async def _navigate_to_facebook(self) -> bool:
+        """Navega para o Facebook com retry e validação melhorada."""
+        for attempt in range(3):
             try:
-                logging.info(f"🌐 Navegando para Facebook (tentativa {attempt + 1}/{retries})")
+                logging.info(f"🌐 Tentativa {attempt + 1}/3 - Navegando para Facebook...")
 
+                # Simular comportamento humano: aguardar um pouco antes de navegar
+                await asyncio.sleep(2)
+
+                # Timing humano variável
+                delay = random.uniform(*HUMAN_TIMING['page_load_wait'])
+                await asyncio.sleep(delay + attempt)
+
+                # Navegar para o Facebook
                 response = await self.page.goto(
-                    FB_URL, 
-                    wait_until='domcontentloaded',
-                    timeout=30000
+                    "https://www.facebook.com", 
+                    wait_until='load', 
+                    timeout=60000
                 )
 
-                if response and response.status < 400:
-                    await asyncio.sleep(3)  # Aguardar carregamento adicional
+                # Re-injetar scripts após navegação
+                await self._inject_stealth_scripts()
+
+                # Aguardar recursos carregarem
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=20000)
+                except:
+                    logging.debug("Timeout networkidle - continuando")
+
+                # Aguardar elementos específicos
+                await asyncio.sleep(5)
+
+                # Verificar múltiplas vezes se CSS carregou
+                css_loaded = False
+                for check in range(3):
+                    has_styles = await self.page.evaluate("""
+                        () => {
+                            const body = document.body;
+                            if (!body) return false;
+
+                            const computedStyle = window.getComputedStyle(body);
+                            const bgColor = computedStyle.backgroundColor;
+                            const textColor = computedStyle.color;
+                            
+                            // Verificar se há folhas de estilo carregadas
+                            const hasStylesheets = document.styleSheets.length > 0;
+                            
+                            // Facebook tem background específico, não texto preto em fundo branco
+                            const hasColors = bgColor !== 'rgba(0, 0, 0, 0)' && 
+                                            bgColor !== 'transparent' && 
+                                            !(bgColor === 'rgb(255, 255, 255)' && textColor === 'rgb(0, 0, 0)');
+                            
+                            return hasStylesheets && hasColors;
+                        }
+                    """)
+
+                    if has_styles:
+                        css_loaded = True
+                        break
+                    
+                    await asyncio.sleep(2)
+
+                if css_loaded:
+                    logging.info("✅ Facebook carregado com estilos CSS")
                     return True
+                else:
+                    logging.warning(f"⚠️ Facebook carregou sem CSS (tentativa {attempt + 1})")
+                    if attempt < 2:
+                        # Estratégias de recuperação
+                        await self._try_recover_css()
+                        continue
 
             except Exception as e:
-                logging.warning(f"⚠️ Tentativa {attempt + 1} falhou: {e}")
-                if attempt < retries - 1:
+                logging.warning(f"❌ Erro na tentativa {attempt + 1}: {e}")
+                if attempt < 2:
                     await asyncio.sleep(5)
                     continue
 
@@ -170,7 +225,7 @@ class PlaywrightFBLogin:
         try:
             # Verificar ausência do formulário de login
             email_form = await self.page.query_selector("input[name='email']")
-            
+
             # Se há formulário de login, definitivamente não está logado
             if email_form:
                 logging.info("❌ Formulário de login detectado - não logado")
@@ -178,7 +233,7 @@ class PlaywrightFBLogin:
 
             # Verificar URL atual para determinar contexto
             current_url = self.page.url.lower()
-            
+
             # Se está na home page, usar verificações específicas
             if '/home.php' in current_url or current_url.endswith('facebook.com/'):
                 # Na home, verificar elementos específicos da timeline
@@ -189,13 +244,13 @@ class PlaywrightFBLogin:
                     "div[aria-label*='Facebook']",  # Logo do Facebook
                     "[data-testid='royal_login_form']"  # Este NÃO deve existir se logado
                 ]
-                
+
                 # Verificar se NÃO há formulário de login
                 login_form = await self.page.query_selector("[data-testid='royal_login_form']")
                 if login_form:
                     logging.info("❌ Formulário real de login detectado na home")
                     return False
-                
+
                 # Verificar se há pelo menos um indicador de home logada
                 for indicator in home_indicators[:4]:  # Excluir o último que é negativo
                     try:
@@ -205,26 +260,26 @@ class PlaywrightFBLogin:
                             return True
                     except Exception:
                         continue
-                        
+
                 # Se chegou aqui, assumir que está logado na home (pode estar carregando)
                 logging.info("✅ Login assumido - página home sem formulário de login")
                 return True
-            
+
             # Se está em outras páginas (grupos, perfil, etc)
             else:
                 # Verificar presença de elementos de navegação
                 navigation = await self.page.query_selector("div[role='navigation']")
                 left_menu = await self.page.query_selector("div[data-testid='left_nav_menu_list']")
                 main_content = await self.page.query_selector("div[role='main']")
-                
+
                 # Considera logado se há navegação OU conteúdo principal
                 is_logged_in = navigation or left_menu or main_content
-                
+
                 if is_logged_in:
                     logging.info("✅ Login confirmado - elementos de navegação disponíveis")
                 else:
                     logging.warning("❌ Elementos de login não encontrados")
-                
+
                 return is_logged_in
 
         except Exception as e:
@@ -367,7 +422,7 @@ class PlaywrightFBLogin:
         """Verifica se está em checkpoint/2FA."""
         try:
             current_url = self.page.url.lower()
-            
+
             # Verificações específicas de URL (mais confiáveis)
             url_checkpoint_indicators = [
                 "/checkpoint/",
@@ -376,17 +431,17 @@ class PlaywrightFBLogin:
                 "checkpoint.php",
                 "two_factor"
             ]
-            
+
             # Se a URL contém indicadores específicos, é checkpoint
             if any(indicator in current_url for indicator in url_checkpoint_indicators):
                 return True
-            
+
             # Se está na home ou em grupos, provavelmente não é checkpoint
             if ('/home.php' in current_url or 
                 '/groups/' in current_url or 
                 current_url.endswith('facebook.com/')):
                 return False
-            
+
             # Verificação adicional por elementos da página (apenas se URL não for conclusiva)
             try:
                 # Procurar por elementos específicos de checkpoint
@@ -397,15 +452,15 @@ class PlaywrightFBLogin:
                     "div:has-text('Two-Factor Authentication')",
                     "div:has-text('Autenticação de dois fatores')"
                 ]
-                
+
                 for selector in checkpoint_elements:
                     element = await self.page.query_selector(selector)
                     if element and await element.is_visible():
                         return True
-                        
+
             except Exception:
                 pass
-            
+
             return False
 
         except Exception:
@@ -471,6 +526,39 @@ class PlaywrightFBLogin:
         except Exception as e:
             logging.error(f"❌ Erro ao navegar para grupo: {e}")
             raise
+
+    async def _inject_stealth_scripts(self):
+        """Injeta scripts para mascarar detecção de automação."""
+        try:
+            await self.page.add_init_script(STEALTH_SCRIPT)
+            logging.debug("🥷 Scripts stealth avançados injetados")
+        
+        except Exception as e:
+            logging.debug(f"Erro ao injetar scripts stealth: {e}")
+
+    async def _try_recover_css(self):
+        """Tenta recuperar carregamento de CSS."""
+        try:
+            logging.info("🔄 Tentando recuperar CSS...")
+            
+            # Estratégia 1: Recarregar página com delay
+            await asyncio.sleep(5)
+            await self.page.reload(wait_until='load', timeout=45000)
+            await self._inject_stealth_scripts()
+            await asyncio.sleep(8)
+            
+            # Estratégia 2: Simular interação humana
+            await self.page.mouse.move(100, 100)
+            await asyncio.sleep(1)
+            await self.page.mouse.move(200, 200)
+            await asyncio.sleep(2)
+            
+            # Estratégia 3: Scroll para ativar recursos
+            await self.page.mouse.wheel(0, 100)
+            await asyncio.sleep(3)
+            
+        except Exception as e:
+            logging.debug(f"Erro na recuperação CSS: {e}")
 
     def get_page(self) -> Page:
         """Retorna a página atual."""
