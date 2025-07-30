@@ -9,12 +9,7 @@ from urllib.parse import urlparse
 from playwright.async_api import Page, Locator
 
 from logger import bot_logger
-from .selectors import (
-    FEED, ARTICLE, POST_SELECTORS, AUTHOR_STRATEGIES, TEXT_STRATEGIES, 
-    IMAGE_STRATEGIES, AUTHOR_EXCLUDE_PATTERNS, TEXT_EXCLUDE_PATTERNS,
-    expand_article_text
-)
-from .selectors import FacebookSelectors # Added FacebookSelectors import
+from .selectors import FacebookSelectors
 
 # Configurar logging para este módulo
 logging.basicConfig(level=logging.INFO)
@@ -861,8 +856,7 @@ async def extract_post_details(post: Locator):
             "has_video": False
         }
 
-    # Expandir texto do artigo antes da extração
-    await expand_article_text(post)
+    # Text expansion is now handled within _extract_text function
 
     # Extrair autor
     author = await _extract_author(post)
