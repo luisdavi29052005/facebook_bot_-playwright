@@ -73,26 +73,52 @@ async def find_next_valid_post(page: Page) -> Optional[Locator]:
     """Encontra o próximo post válido usando os seletores do FacebookSelectors."""
     bot_logger.debug("🔍 Buscando próximo post válido...")
 
+    # Verificar estado da página
     if page.is_closed():
         bot_logger.warning("Página fechada - cancelando busca")
         return None
 
-    await wait_for_page_stability(page)
+    # Aguardar estabilidade da página antes de buscar posts
+    try:
+        await wait_for_page_stability(page, timeout=10000)
+        bot_logger.debug("Página estabilizada, iniciando busca de posts")
+    except Exception as e:
+        bot_logger.warning(f"Erro ao aguardar estabilidade: {e}")
+        if page.is_closed():
+            return None
 
     # Usar seletores do FacebookSelectors
     post_selectors = FacebookSelectors.get_post_containers()
 
     for attempt in range(5):
+        # Verificar estado da página a cada tentativa
+        if page.is_closed():
+            bot_logger.warning("Página fechada durante busca - cancelando")
+            return None
+
         if attempt > 0:
             scroll_distance = 800 + (attempt * 400)
             bot_logger.debug(f"📜 Tentativa {attempt + 1} - Rolando {scroll_distance}px...")
             try:
+                # Verificar novamente antes de scroll
+                if page.is_closed():
+                    bot_logger.warning("Página fechada antes do scroll")
+                    return None
+                    
                 await page.mouse.wheel(0, scroll_distance)
                 await asyncio.sleep(2)
                 await wait_for_page_stability(page, timeout=5000)
             except Exception as e:
-                bot_logger.debug(f"Erro ao rolar: {e}")
-                break
+                error_msg = str(e)
+                if "Target page" in error_msg and "has been closed" in error_msg:
+                    bot_logger.warning("Target page fechada durante scroll")
+                    return None
+                elif "Connection closed" in error_msg:
+                    bot_logger.warning("Conexão fechada durante scroll")
+                    return None
+                else:
+                    bot_logger.debug(f"Erro ao rolar: {e}")
+                    break
 
         # Buscar posts com seletores do FacebookSelectors
         for selector_idx, selector in enumerate(post_selectors):
@@ -109,17 +135,31 @@ async def find_next_valid_post(page: Page) -> Optional[Locator]:
                     try:
                         post = posts.nth(i)
 
+                        # Verificar visibilidade básica primeiro
                         if not await post.is_visible():
                             continue
 
-                        # Usar viewport_config para garantir visibilidade
-                        is_visible = await ensure_element_visible(page, post)
-                        if not is_visible:
+                        # Usar viewport_config para garantir visibilidade completa
+                        try:
+                            is_visible = await ensure_element_visible(page, post)
+                            if not is_visible:
+                                bot_logger.debug(f"Post não pôde ser tornado visível")
+                                continue
+                        except Exception as e:
+                            bot_logger.debug(f"Erro ao tornar post visível: {e}")
                             continue
 
                         # Validação básica de post
                         if await is_valid_post(post):
                             bot_logger.success(f"✅ POST VÁLIDO encontrado!")
+                            
+                            # Log adicional para debug
+                            try:
+                                bbox = await post.bounding_box()
+                                bot_logger.debug(f"Post encontrado na posição: {bbox}")
+                            except Exception:
+                                pass
+                            
                             return post
 
                     except Exception as e:
@@ -218,15 +258,26 @@ async def extract_post_details(post: Locator, n8n_webhook_url: str = "") -> Dict
 
     return {"author": "", "text": "", "image_url": "", "images_extra": [], "has_video": False}
 
-async def take_post_screenshot(post: Locator) -> str:
-    """Tira screenshot otimizado do post."""
+async def take_post_screenshot(post: Locator) -> Optional[str]:
+    """Tira screenshot otimizado do post com verificações robustas."""
     try:
-        if post.page.is_closed():
-            bot_logger.error("Página fechada")
-            return ""
+        # Verificações iniciais de estado
+        if not post or post.page.is_closed():
+            bot_logger.error("Post inválido ou página fechada")
+            return None
 
         page = post.page
-        bot_logger.debug("📸 Tirando screenshot do post...")
+        bot_logger.debug("📸 Preparando screenshot do post...")
+
+        # Garantir que o post está visível usando viewport_config
+        try:
+            is_visible = await ensure_element_visible(page, post)
+            if not is_visible:
+                bot_logger.warning("Post não pôde ser tornado visível para screenshot")
+                return None
+        except Exception as e:
+            bot_logger.warning(f"Erro ao garantir visibilidade para screenshot: {e}")
+            return None
 
         # Timestamp único
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -279,36 +330,67 @@ async def take_post_screenshot(post: Locator) -> str:
 
         await asyncio.sleep(0.3)
 
-        # Tirar screenshot
+        # Tirar screenshot com tratamento robusto de erros
         screenshot_path = screenshots_dir / f"post_{timestamp}.png"
 
         try:
+            # Verificar estado da página antes do screenshot
+            if page.is_closed():
+                bot_logger.error("Página fechada antes do screenshot")
+                return None
+
             bbox = await screenshot_element.bounding_box()
-            if bbox:
+            if bbox and bbox["width"] > 0 and bbox["height"] > 0:
                 await page.screenshot(
                     path=str(screenshot_path),
                     clip={
-                        "x": bbox["x"],
-                        "y": bbox["y"], 
-                        "width": bbox["width"],
-                        "height": bbox["height"]
+                        "x": max(0, bbox["x"]),
+                        "y": max(0, bbox["y"]), 
+                        "width": min(bbox["width"], 1920),
+                        "height": min(bbox["height"], 1080)
                     }
                 )
             else:
+                # Fallback para screenshot do elemento
                 await screenshot_element.screenshot(path=str(screenshot_path))
-        except Exception:
+                
+        except Exception as screenshot_error:
+            bot_logger.warning(f"Primeiro método de screenshot falhou: {screenshot_error}")
+            
+            # Segunda tentativa com método alternativo
             try:
-                await screenshot_element.screenshot(path=str(screenshot_path))
-            except Exception as e:
-                bot_logger.error(f"Erro no screenshot: {e}")
-                return ""
+                if not page.is_closed():
+                    await screenshot_element.screenshot(path=str(screenshot_path))
+                else:
+                    bot_logger.error("Página fechada durante segunda tentativa de screenshot")
+                    return None
+            except Exception as final_error:
+                error_msg = str(final_error)
+                if "Target page" in error_msg and "has been closed" in error_msg:
+                    bot_logger.error("Target page fechada durante screenshot")
+                elif "Connection closed" in error_msg:
+                    bot_logger.error("Conexão fechada durante screenshot")
+                else:
+                    bot_logger.error(f"Erro final no screenshot: {final_error}")
+                return None
 
-        bot_logger.success(f"📸 Screenshot salvo: {screenshot_path}")
-        return str(screenshot_path)
+        # Validar se o arquivo foi criado com sucesso
+        if screenshot_path.exists() and screenshot_path.stat().st_size > 0:
+            bot_logger.success(f"📸 Screenshot salvo: {screenshot_path}")
+            return str(screenshot_path)
+        else:
+            bot_logger.error("Screenshot não foi salvo corretamente")
+            return None
 
     except Exception as e:
-        bot_logger.error(f"Erro geral no screenshot: {e}")
-        return ""
+        error_msg = str(e)
+        if "Target page" in error_msg and "has been closed" in error_msg:
+            bot_logger.error("Target page fechada durante processo de screenshot")
+        elif "Connection closed" in error_msg:
+            bot_logger.error("Conexão fechada durante processo de screenshot")
+        else:
+            bot_logger.error(f"Erro geral no screenshot: {e}")
+        return None
 
 async def extract_post_id(post_element: Locator) -> str:
     """Extrai ID único do post."""
