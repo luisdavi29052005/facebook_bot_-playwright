@@ -11,12 +11,17 @@ class FacebookSelectors:
         '[role="article"]',  # Semantic role
         '[data-pagelet="FeedUnit"]',  # Facebook data attribute
         '[data-testid="fbfeed_story"]',  # Test ID attribute
+        'div.html-div.xdj266r.x14z9mp.xat24cr.x1lziwak.xexx8yu.xyri2b.x18d9i69.x1c1uobl:has([data-ad-rendering-role="profile_name"])',  # Posts with profile names
+        'div:has(> div > div[data-ad-rendering-role="story_message"])',  # Posts with story messages
         '.x1yztbdb.x1n2onr6.xh8yej3.x1ja2u2z',  # Class fallback
         '.x1lliihq.x1plvlek.xryxfnj.x1n2onr6.x193iq5w.xeuugli.x1fj9vlw.x13faqbe.x1vvkbs.x1s928wv.xhkezso.x1gmr53x.x1cpjm7i.x1fgarty.x1943h6x.x1i0vuye.xvs91rp.xo1l8bm.x5n08af.x10wh9bi.x1wdrske.x8viiok.x18hxmgj'
     ]
 
     # Author name selectors
     AUTHOR_SELECTORS = [
+        '[data-ad-rendering-role="profile_name"] h2 strong',  # Profile name in header
+        '[data-ad-rendering-role="profile_name"] a strong',  # Profile name in link
+        'h2 span strong',  # Strong text in h2 spans
         '[role="link"] strong',  # Link with strong text (name)
         'h3 [role="link"]',  # Header link
         'h3 strong a',  # Header strong link
@@ -28,8 +33,10 @@ class FacebookSelectors:
 
     # Post text content selectors
     TEXT_SELECTORS = [
+        '[data-ad-rendering-role="story_message"] div[dir="auto"]',  # Story message with direction
         '[data-ad-preview="message"]',  # Data attribute for message
         '[data-testid="post_message"]',  # Test ID for post message
+        'div[data-ad-rendering-role="story_message"] .xdj266r.x14z9mp.xat24cr.x1lziwak.x1vvkbs',  # Story message div
         '[role="article"] [dir="auto"]',  # Article with dir attribute
         '.x11i5rnm.xat24cr.x1mh8g0r.x1vvkbs',  # Class fallback
         '.xdj266r.x14z9mp.xat24cr.x1lziwak.x1vvkbs'
@@ -85,6 +92,15 @@ class FacebookSelectors:
         "más",
         "show more",
         "mostrar mais"
+    ]
+
+    # Patterns to identify repetitive/skeleton content
+    REPETITIVE_CONTENT_PATTERNS = [
+        "facebook",
+        "blockquote",
+        "aria-hidden=\"true\"",
+        "data-0=\"0\" data-1=\"1\"",  # Pattern from HTML examples
+        "x7600vw x10l6tqk x1dquyif"  # Repetitive CSS classes
     ]
 
     # Invalid author patterns (timestamps, UI elements)

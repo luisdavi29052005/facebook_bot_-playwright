@@ -338,18 +338,12 @@ async def main_loop():
                             # Marcar no DOM para não reaparecer
                             try:
                                 await post_element.evaluate('el => el.setAttribute("data-processed", "true")')
-                                logger.debug("Post marcado como processado no DOM")
+                                bot_logger.debug("Post marcado como processado no DOM")
                             except Exception as e:
-                                logger.debug(f"Erro ao marcar post no DOM: {e}")
+                                bot_logger.debug(f"Erro ao marcar post no DOM: {e}")
                         else:
                             # Se falhou, não marca como processado para tentar novamente depois
-                            logger.debug("Post não foi processado com sucesso, não marcando como processado")
-
-                        # Scroll e pausa para próximo post
-                        try:
-                            await post_element.evaluate('el => el.setAttribute("data-processed", "true")')
-                        except Exception:
-                            pass
+                            bot_logger.debug("Post não foi processado com sucesso, não marcando como processado")
 
                         if success:
                             leads_found += 1

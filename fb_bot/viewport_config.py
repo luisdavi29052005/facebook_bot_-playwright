@@ -49,11 +49,33 @@ async def setup_optimal_viewport(page: Page, config_name: str = "desktop_hd") ->
                 min-height: 100px !important;
                 visibility: visible !important;
                 opacity: 1 !important;
+                border: 2px solid rgba(0,0,0,0.1) !important;
+                margin: 10px 0 !important;
+                background: white !important;
             }
             
             /* Evitar elementos colapsados */
             div[data-ad-rendering-role="story_message"] {
                 min-height: 50px !important;
+                visibility: visible !important;
+            }
+            
+            /* Melhorar visibilidade de autor */
+            [data-ad-rendering-role="profile_name"] {
+                visibility: visible !important;
+                opacity: 1 !important;
+            }
+            
+            /* Esconder elementos repetitivos */
+            div[aria-hidden="true"]:has(div[data-0][data-1][data-2]) {
+                display: none !important;
+            }
+            
+            /* Garantir que imagens sejam visíveis */
+            img {
+                opacity: 1 !important;
+                visibility: visible !important;
+                max-width: 100% !important;
             }
         """)
         
@@ -168,8 +190,10 @@ async def optimize_page_for_extraction(page: Page) -> None:
             /* Melhorar visibilidade de textos */
             [role="article"] {
                 background: white !important;
-                border: 1px solid #e4e6ea !important;
-                margin-bottom: 16px !important;
+                border: 2px solid #3b82f6 !important;
+                margin-bottom: 20px !important;
+                padding: 15px !important;
+                border-radius: 8px !important;
             }
             
             /* Destacar elementos importantes */
@@ -178,15 +202,41 @@ async def optimize_page_for_extraction(page: Page) -> None:
                 color: #1c1e21 !important;
             }
             
+            /* Melhorar visibilidade de mensagens de post */
+            [data-ad-rendering-role="story_message"] {
+                background: #f8fafc !important;
+                padding: 10px !important;
+                border-radius: 4px !important;
+                margin: 8px 0 !important;
+            }
+            
+            /* Destacar nome do autor */
+            [data-ad-rendering-role="profile_name"] h2 {
+                background: #e1f5fe !important;
+                padding: 5px !important;
+                border-radius: 4px !important;
+            }
+            
             /* Garantir que imagens sejam carregadas */
             img {
                 opacity: 1 !important;
                 visibility: visible !important;
+                max-width: 100% !important;
+                border-radius: 4px !important;
+            }
+            
+            /* Esconder elementos repetitivos/skeleton */
+            div[aria-hidden="true"]:has(blockquote) {
+                display: none !important;
+            }
+            
+            div:has(> div[data-0][data-1][data-2][data-3][data-4]) {
+                display: none !important;
             }
         """)
         
         # Aguardar aplicação dos estilos
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.8)
         
         logger.debug("✅ Página otimizada para extração")
         
@@ -207,37 +257,66 @@ async def wait_for_page_stability(page: Page, timeout: int = 10000) -> bool:
     try:
         # Aguardar rede ficar ociosa
         try:
-            await page.wait_for_load_state("networkidle", timeout=timeout)
+            await page.wait_for_load_state("networkidle", timeout=min(timeout, 8000))
         except Exception:
             logger.debug("Timeout networkidle - continuando")
         
-        # Aguardar elementos de post aparecerem
-        try:
-            await page.wait_for_selector('[role="article"]', timeout=5000)
-        except Exception:
-            logger.debug("Posts não encontrados no timeout")
+        # Importar seletores do FacebookSelectors
+        from .selectors import FacebookSelectors
+        
+        # Aguardar elementos de post aparecerem usando seletores oficiais
+        post_found = False
+        post_selectors = FacebookSelectors.get_post_containers()
+        
+        for selector in post_selectors[:4]:  # Usar primeiros 4 seletores
+            try:
+                await page.wait_for_selector(selector, timeout=3000)
+                post_found = True
+                logger.debug(f"Posts encontrados com seletor: {selector}")
+                break
+            except Exception:
+                continue
+        
+        if not post_found:
+            logger.debug("Nenhum post encontrado com seletores conhecidos")
         
         # Verificar se há esqueletos de carregamento
         skeleton_gone = False
-        for attempt in range(10):  # 10 tentativas de 500ms
+        for attempt in range(15):
             try:
-                skeletons = page.locator('[data-visualcompletion="loading-state"]:visible')
-                skeleton_count = await skeletons.count()
+                loading_selectors = [
+                    '[data-visualcompletion="loading-state"]:visible',
+                    '[data-testid="content-placeholder"]:visible',
+                    '[aria-label*="Loading"]:visible',
+                    '[aria-label*="Carregando"]:visible'
+                ]
                 
-                if skeleton_count == 0:
+                total_loading = 0
+                for loading_selector in loading_selectors:
+                    try:
+                        loading_elements = page.locator(loading_selector)
+                        count = await loading_elements.count()
+                        total_loading += count
+                    except Exception:
+                        continue
+                
+                if total_loading == 0:
                     skeleton_gone = True
                     break
                     
-                logger.debug(f"Aguardando {skeleton_count} skeletons desaparecerem...")
+                logger.debug(f"Aguardando {total_loading} elementos de carregamento desaparecerem...")
                 await asyncio.sleep(0.5)
                 
             except Exception:
                 break
         
         if skeleton_gone:
-            logger.debug("✅ Página estável - skeletons removidos")
+            logger.debug("✅ Página estável - elementos de carregamento removidos")
         else:
-            logger.debug("⚠️ Alguns skeletons ainda presentes")
+            logger.debug("⚠️ Alguns elementos de carregamento ainda presentes")
+        
+        # Aguardamento adicional
+        await asyncio.sleep(1)
         
         return True
         
