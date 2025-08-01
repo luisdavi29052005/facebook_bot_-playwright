@@ -20,36 +20,30 @@ class StateManager:
     def _load_state(self):
         """Carrega estado do arquivo com normalização de IDs."""
         try:
-            if self.state_file.exists():
+            if self.state_file.exists() and self.state_file.stat().st_size > 0:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        logger.debug("Arquivo de estado vazio, inicializando com conjunto vazio")
+                        return set()
 
-                # Normalizar IDs antigos
-                normalized_ids = set()
-                for post_id in data:
-                    normalized_id = self._normalize_post_id(post_id)
-                    normalized_ids.add(normalized_id)
-
-                self._processed_ids = normalized_ids
-                # Log apenas na primeira inicialização ou quando houver mudança significativa
-                if not hasattr(self, '_last_logged_count'):
-                    logger.info(f"Estado carregado: {len(self._processed_ids)} posts processados")
-                    self._last_logged_count = len(self._processed_ids)
-                elif abs(len(self._processed_ids) - self._last_logged_count) > 5:
-                    logger.info(f"Estado atualizado: {len(self._processed_ids)} posts processados")
-                    self._last_logged_count = len(self._processed_ids)
-
-                # Salvar versão normalizada se houve mudanças
-                if len(normalized_ids) != len(data) or normalized_ids != set(data):
-                    self._save_state()
-            else:
-                logger.info("Arquivo de estado não encontrado, iniciando vazio")
-                self._last_logged_count = 0
-
+                    data = json.loads(content)
+                    if isinstance(data, list):
+                        return set(data)
+                    elif isinstance(data, dict):
+                        return set(data.get('processed_posts', []))
+            return set()
+        except json.JSONDecodeError as e:
+            logger.warning(f"Arquivo de estado corrompido, reinicializando: {e}")
+            # Remove arquivo corrompido e reinicializa
+            try:
+                self.state_file.unlink()
+            except Exception:
+                pass
+            return set()
         except Exception as e:
             logger.error(f"Erro ao carregar estado: {e}")
-            self._processed_ids = set()
-            self._last_logged_count = 0
+            return set()
 
     def _normalize_post_id(self, post_id: str) -> str:
         """Normaliza ID do post para formato consistente."""

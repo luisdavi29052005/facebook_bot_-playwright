@@ -330,11 +330,22 @@ async def main_loop():
                         success = await processor.process_post(post_element, page)
 
                         # ═══ ETAPA 4: MARCAR COMO PROCESSADO ═══
-                        # Adicionar às chaves processadas
-                        state.add(post_key)
-                        seen_this_run.add(post_key)
+                        if success:
+                            # Só adiciona ao estado se processou com sucesso
+                            state.add(post_key)
+                            seen_this_run.add(post_key)
 
-                        # Marcar no DOM para não reaparecer
+                            # Marcar no DOM para não reaparecer
+                            try:
+                                await post_element.evaluate('el => el.setAttribute("data-processed", "true")')
+                                logger.debug("Post marcado como processado no DOM")
+                            except Exception as e:
+                                logger.debug(f"Erro ao marcar post no DOM: {e}")
+                        else:
+                            # Se falhou, não marca como processado para tentar novamente depois
+                            logger.debug("Post não foi processado com sucesso, não marcando como processado")
+
+                        # Scroll e pausa para próximo post
                         try:
                             await post_element.evaluate('el => el.setAttribute("data-processed", "true")')
                         except Exception:
